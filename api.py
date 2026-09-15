@@ -9,6 +9,7 @@ Lines come back as a list already sorted top-to-bottom of the deskewed page, eac
 with a 1-based `index`. Iterate the list as-is to process the page in order.
 """
 import base64
+import json
 import shutil
 import tempfile
 import uuid
@@ -18,14 +19,14 @@ from typing import Literal, Optional
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
-from linecut import segment_page, segment_page_instances
+from linecut import dual_ocr, segment_page, segment_page_instances
 
 app = FastAPI(
     title="linecut",
-    description="Segments document images into ordered, indexed text-line crops.",
-    version="1.0",
+    description="Segments document images into ordered lines and converts them to digital documents using parallel Dual-OCR.",
+    version="2.0",
 )
 
 JOBS = Path(tempfile.gettempdir()) / "linecut-jobs"
@@ -48,9 +49,11 @@ async def segment(
     threshold: float = Form(0.30, description="Max seam cost to accept a cut (global mode)"),
     dewarp: bool = Form(True, description="Straighten each line before cropping (global mode)"),
     rotate: float = Form(0.0, description="Extra rotation in degrees, added to the detected angle"),
+    ocr: bool = Form(True, description="Scan lines with parallel Dual-OCR (PaddleOCR + TrOCR)"),
+    ocr_lang: str = Form("en", description="Target OCR language (en, devanagari, hi, etc.)"),
     include_images: bool = Form(True, description="Inline base64 PNG per line"),
     include_raw: bool = Form(False, description="Also inline the unmasked strip per line"),
-    keep: bool = Form(True, description="Keep crops on disk for /jobs fetches"),
+    keep: bool = Form(True, description="Keep crops and documents on disk for /jobs fetches"),
 ):
     raw = await image.read()
     if not raw:
@@ -82,10 +85,48 @@ async def segment(
     manifest["job_id"] = job_id
     manifest["source"] = image.filename
 
+    # Execute Parallel Dual-OCR if requested
+    if ocr and manifest.get("lines"):
+        try:
+            scanned = dual_ocr.scan_manifest_lines_parallel(manifest["lines"], out_dir, lang=ocr_lang)
+            for line_entry, ocr_result in zip(manifest["lines"], scanned):
+                line_entry["text"] = ocr_result.get("final_text", "")
+                line_entry["confidence_ocr"] = ocr_result.get("confidence", 0.0)
+                line_entry["dual_ocr"] = {
+                    "paddle": ocr_result.get("paddle", {}),
+                    "trocr": ocr_result.get("trocr", {}),
+                    "status": ocr_result.get("status", "unknown"),
+                    "similarity": ocr_result.get("similarity"),
+                    "corrections": ocr_result.get("corrections_applied", []),
+                }
+
+            # Generate Document Outputs
+            doc_title = Path(image.filename or "Document").stem
+            md_text = dual_ocr.export_markdown(scanned, title=doc_title)
+            txt_text = dual_ocr.export_text(scanned)
+            docx_path = out_dir / "document.docx"
+            dual_ocr.export_docx(scanned, docx_path, title=doc_title)
+
+            # Persist textual files
+            (out_dir / "document.md").write_text(md_text, encoding="utf-8")
+            (out_dir / "document.txt").write_text(txt_text, encoding="utf-8")
+
+            manifest["markdown"] = md_text
+            manifest["document_text"] = txt_text
+            manifest["documents"] = {
+                "markdown": f"/jobs/{job_id}/document.md",
+                "docx": f"/jobs/{job_id}/document.docx",
+                "text": f"/jobs/{job_id}/document.txt",
+                "latent": f"/jobs/{job_id}/latent.json",
+            }
+        except Exception as ocr_exc:
+            manifest["ocr_error"] = str(ocr_exc)
+
     if include_images:
         for line in manifest["lines"]:
-            data = (out_dir / line["file"]).read_bytes()
-            line["png_base64"] = base64.b64encode(data).decode()
+            crop_path = out_dir / line["file"]
+            if crop_path.is_file():
+                line["png_base64"] = base64.b64encode(crop_path.read_bytes()).decode()
 
     if include_raw:
         for line in manifest["lines"]:
@@ -98,12 +139,69 @@ async def segment(
         if line.get("file_raw"):
             line["url_raw"] = f"/jobs/{job_id}/lines/{line['index']}?variant=raw"
 
+    # Save latent representation
+    latent_path = out_dir / "latent.json"
+    latent_data = {
+        "job_id": job_id,
+        "source": image.filename,
+        "lines_found": manifest.get("lines_found", 0),
+        "deskew_deg": manifest.get("deskew_deg"),
+        "layout": manifest.get("layout"),
+        "lines": manifest["lines"],
+    }
+    latent_path.write_text(json.dumps(latent_data, indent=2), encoding="utf-8")
+    manifest["raw_latent"] = latent_data
+
     if not keep:
         shutil.rmtree(out_dir, ignore_errors=True)
         for line in manifest["lines"]:
             line.pop("url", None)
 
     return JSONResponse(manifest)
+
+
+@app.get("/jobs/{job_id}/document.md")
+def get_document_markdown(job_id: str):
+    """Download the reconstructed document in Markdown (.md) format."""
+    if not job_id.isalnum():
+        raise HTTPException(400, "bad job id")
+    path = JOBS / job_id / "document.md"
+    if not path.is_file():
+        raise HTTPException(404, "markdown document not found")
+    return PlainTextResponse(path.read_text(encoding="utf-8"), media_type="text/markdown")
+
+
+@app.get("/jobs/{job_id}/document.docx")
+def get_document_docx(job_id: str):
+    """Download the reconstructed document in Word (.docx) format."""
+    if not job_id.isalnum():
+        raise HTTPException(400, "bad job id")
+    path = JOBS / job_id / "document.docx"
+    if not path.is_file():
+        raise HTTPException(404, "docx document not found")
+    return FileResponse(path, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename="document.docx")
+
+
+@app.get("/jobs/{job_id}/document.txt")
+def get_document_text(job_id: str):
+    """Download the reconstructed document in Plain Text (.txt) format."""
+    if not job_id.isalnum():
+        raise HTTPException(400, "bad job id")
+    path = JOBS / job_id / "document.txt"
+    if not path.is_file():
+        raise HTTPException(404, "text document not found")
+    return PlainTextResponse(path.read_text(encoding="utf-8"), media_type="text/plain")
+
+
+@app.get("/jobs/{job_id}/latent.json")
+def get_document_latent(job_id: str):
+    """Fetch the full raw latent JSON state of the document."""
+    if not job_id.isalnum():
+        raise HTTPException(400, "bad job id")
+    path = JOBS / job_id / "latent.json"
+    if not path.is_file():
+        raise HTTPException(404, "latent representation not found")
+    return FileResponse(path, media_type="application/json")
 
 
 @app.get("/jobs/{job_id}/lines/{index}")
@@ -130,3 +228,4 @@ def drop_job(job_id: str):
         raise HTTPException(404, "no such job")
     shutil.rmtree(target, ignore_errors=True)
     return {"deleted": job_id}
+
