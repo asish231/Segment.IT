@@ -15,7 +15,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import bands, core, energy, ribbons, seams
+from . import bands, core, energy, ribbons, seams, structure
 
 
 def segment_page_instances(path, out_dir, device="cpu", thresh=0.45, src=None,
@@ -109,10 +109,17 @@ def segment_page_instances(path, out_dir, device="cpu", thresh=0.45, src=None,
     # reading order: top to bottom, then left to right within a line band
     found.sort(key=lambda f: (round(f["centre"][1] / max(pitch * 0.6, 1)), f["centre"][0]))
 
+    # -- stage 6: page structure (rules, rows, per-row fields) ----------------
+    h_rules, v_rules = structure.find_rules(binary_d)
+    gutters = structure.page_gutters(binary_d)
+    layout = structure.classify(h_rules, v_rules, len(gutters))
+    rows = structure.assign_rows([f["centre"][1] for f in found], h_rules, pitch)
+
     records = []
     for i, item in enumerate(found, 1):
         name = f"line_{i:04d}.png"
         cv2.imwrite(str(crops_dir / name), item["crop"])
+        fields = structure.split_fields(item["crop"])
         sp = item["spine"]
         poly = ribbons.outline(sp, pitch * 1.2)
         back = (inverse @ np.hstack([poly, np.ones((len(poly), 1), np.float32)]).T).T / factor
@@ -123,6 +130,8 @@ def segment_page_instances(path, out_dir, device="cpu", thresh=0.45, src=None,
             "angle_deg": round(item["angle"], 2),
             "curvature_px": round(item["curvature"], 2),
             "ink_pixels": item["ink"],
+            "row": int(rows.get(i - 1, i - 1)),
+            "fields": [{"x0": int(a), "x1": int(b)} for a, b in fields],
             "size": [int(item["crop"].shape[1]), int(item["crop"].shape[0])],
             "spine_on_source": [[round(float(x), 1), round(float(y), 1)] for x, y in spine_back],
             "spine_deskewed": [[round(float(x), 1), round(float(y), 1)] for x, y in sp],
@@ -144,6 +153,11 @@ def segment_page_instances(path, out_dir, device="cpu", thresh=0.45, src=None,
         "deskew_deg": round(float(orient.angle), 2),
         "deskew_margin": round(float(orient.margin), 3) if np.isfinite(orient.margin) else None,
         "line_pitch_px": round(pitch, 1),
+        "layout": layout,
+        "rules_horizontal": len(h_rules),
+        "rules_vertical": len(v_rules),
+        "column_gutters": len(gutters),
+        "rows": (max(rows.values()) + 1) if rows else 0,
         "ribbons_detected": count,
         "ribbons_after_merge": len(spines),
         "lines_found": len(records),

@@ -15,3 +15,6 @@ out_*/
 
 # trained weights (regenerate with train_orient.py; current one is disabled anyway)
 *.pt
+
+# viewer build assets
+viewer_assets/
