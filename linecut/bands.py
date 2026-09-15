@@ -146,7 +146,13 @@ def spine_in_band(prob, ink, y_center, half_height, stroke=3.0):
     if len(xs) < 8:
         return None
     path = np.stack([np.array(xs, np.float32), np.array(ys, np.float32)], axis=1)
-    k = min(len(path) // 2 * 2 + 1, max(5, int(stroke * 3) | 1))
+
+    # Smooth over a window scaled to LINE PITCH, not stroke width. Rectification samples
+    # perpendicular to this path, so any wobble at stroke scale shears the text sideways
+    # and shreds the glyphs - which looked like over-aggressive masking but was actually
+    # this. A real baseline curves slowly; wobble near stroke scale is noise, not signal.
+    k = int(max(5, half_height * 2)) | 1
+    k = min(k, (len(path) // 2) * 2 + 1)
     if k >= 3:
         path[:, 1] = cv2.GaussianBlur(path[:, 1].reshape(-1, 1), (1, k), 0).ravel()
     return path

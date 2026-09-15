@@ -79,6 +79,8 @@ def segment_page_instances(path, out_dir, device="cpu", thresh=0.45, src=None,
     out_dir = Path(out_dir)
     crops_dir = out_dir / "lines"
     crops_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = out_dir / "lines_raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
 
     found = []
     for rid, path_pts in enumerate(spines, 1):
@@ -90,16 +92,34 @@ def segment_page_instances(path, out_dir, device="cpu", thresh=0.45, src=None,
                                             mask=owned)
         if strip is None:
             continue
-        crop = np.where(np.repeat(strip_mask[:, :, None], 3, axis=2), strip, 255).astype(np.uint8)
         if ribbons.is_non_text_region(strip, mask=strip_mask):
             continue
-        crop = ribbons.trim(crop, strip_mask, pad=int(max(2, stroke)))
+
+        # Suppress only ink belonging to a NEIGHBOURING line. Masking to this line's own
+        # binary ink instead would throw away every pixel the threshold missed - measured
+        # at 41% of real dark pixels on a photographed page - which is what shredded
+        # strokes into speckle. The binary mask decides geometry; the photo stays intact.
+        others = (owner > 0) & (owner != rid)
+        if others.any():
+            halo = max(3, int(stroke * 2) | 1)
+            others = cv2.dilate(others.astype(np.uint8),
+                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (halo, halo))) > 0
+            _, others_strip = ribbons.rectify(deskewed, path_pts, height=pitch * 1.8,
+                                              mask=others)
+        else:
+            others_strip = None
+
+        crop = strip.copy()
+        if others_strip is not None:
+            crop[others_strip] = 255
+        crop = ribbons.trim(crop, strip_mask, pad=int(max(3, stroke * 2)))
         if crop.size == 0:
             continue
 
         found.append({
             "spine": path_pts,
             "crop": crop,
+            "raw": ribbons.trim(strip.copy(), strip_mask, pad=int(max(3, stroke * 2))),
             "ink": int(owned.sum()),
             "angle": ribbons.angle_of(path_pts),
             "curvature": ribbons.curvature_of(path_pts),
@@ -119,6 +139,8 @@ def segment_page_instances(path, out_dir, device="cpu", thresh=0.45, src=None,
     for i, item in enumerate(found, 1):
         name = f"line_{i:04d}.png"
         cv2.imwrite(str(crops_dir / name), item["crop"])
+        if item.get("raw") is not None and item["raw"].size:
+            cv2.imwrite(str(raw_dir / name), item["raw"])
         fields = structure.split_fields(item["crop"])
         sp = item["spine"]
         poly = ribbons.outline(sp, pitch * 1.2)
@@ -127,6 +149,7 @@ def segment_page_instances(path, out_dir, device="cpu", thresh=0.45, src=None,
         records.append({
             "index": i,
             "file": f"lines/{name}",
+            "file_raw": f"lines_raw/{name}",
             "angle_deg": round(item["angle"], 2),
             "curvature_px": round(item["curvature"], 2),
             "ink_pixels": item["ink"],
