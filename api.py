@@ -20,7 +20,7 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
-from linecut import segment_page
+from linecut import segment_page, segment_page_instances
 
 app = FastAPI(
     title="linecut",
@@ -43,10 +43,13 @@ def health():
 async def segment(
     image: UploadFile = File(..., description="Page image (png/jpg/tif)"),
     device: Literal["cpu", "mps"] = Form("cpu"),
-    threshold: float = Form(0.30, description="Max seam cost to accept a cut"),
-    dewarp: bool = Form(True, description="Straighten each line before cropping"),
+    mode: Literal["instances", "global"] = Form("instances",
+        description="instances: per-line angle and curve (default). global: one page angle."),
+    threshold: float = Form(0.30, description="Max seam cost to accept a cut (global mode)"),
+    dewarp: bool = Form(True, description="Straighten each line before cropping (global mode)"),
     rotate: float = Form(0.0, description="Extra rotation in degrees, added to the detected angle"),
     include_images: bool = Form(True, description="Inline base64 PNG per line"),
+    include_raw: bool = Form(False, description="Also inline the unmasked strip per line"),
     keep: bool = Form(True, description="Keep crops on disk for /jobs fetches"),
 ):
     raw = await image.read()
@@ -62,11 +65,16 @@ async def segment(
     job_id = uuid.uuid4().hex
     out_dir = JOBS / job_id
     try:
-        manifest = segment_page(
-            image.filename or "upload", out_dir,
-            device=device, dewarp=dewarp, threshold=threshold,
-            rotate_extra=rotate, src=decoded,
-        )
+        if mode == "instances":
+            manifest = segment_page_instances(
+                image.filename or "upload", out_dir, device=device, src=decoded,
+            )
+        else:
+            manifest = segment_page(
+                image.filename or "upload", out_dir,
+                device=device, dewarp=dewarp, threshold=threshold,
+                rotate_extra=rotate, src=decoded,
+            )
     except Exception as exc:
         shutil.rmtree(out_dir, ignore_errors=True)
         raise HTTPException(500, f"segmentation failed: {exc}") from exc
@@ -79,8 +87,16 @@ async def segment(
             data = (out_dir / line["file"]).read_bytes()
             line["png_base64"] = base64.b64encode(data).decode()
 
+    if include_raw:
+        for line in manifest["lines"]:
+            raw_rel = line.get("file_raw")
+            if raw_rel and (out_dir / raw_rel).is_file():
+                line["png_base64_raw"] = base64.b64encode((out_dir / raw_rel).read_bytes()).decode()
+
     for line in manifest["lines"]:
         line["url"] = f"/jobs/{job_id}/lines/{line['index']}"
+        if line.get("file_raw"):
+            line["url_raw"] = f"/jobs/{job_id}/lines/{line['index']}?variant=raw"
 
     if not keep:
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -91,11 +107,15 @@ async def segment(
 
 
 @app.get("/jobs/{job_id}/lines/{index}")
-def get_line(job_id: str, index: int):
-    """Fetch one line crop by its reading-order index."""
+def get_line(job_id: str, index: int, variant: Literal["clean", "raw"] = "clean"):
+    """Fetch one line crop by its reading-order index.
+
+    variant=clean removes neighbouring lines' ink; variant=raw is the untouched strip.
+    """
     if not job_id.isalnum():
         raise HTTPException(400, "bad job id")
-    path = JOBS / job_id / "lines" / f"line_{index:04d}.png"
+    folder = "lines_raw" if variant == "raw" else "lines"
+    path = JOBS / job_id / folder / f"line_{index:04d}.png"
     if not path.is_file():
         raise HTTPException(404, "no such line")
     return FileResponse(path, media_type="image/png")

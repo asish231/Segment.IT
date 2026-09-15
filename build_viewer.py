@@ -1,12 +1,19 @@
 #!/usr/bin/env python
 """Generate the segmentation viewer: one self-contained HTML page over the run output.
 
+Scans output/ for whatever pages are there, so it always reflects the last run.
 Manifest data is inlined rather than fetched, because the artifact sandbox blocks XHR.
 """
 import json
+import shutil
 from pathlib import Path
 
-PAGES = ["sample", "image", "image copy", "image copy 2"]
+import cv2
+
+OUT = Path("output")
+ASSETS = Path("viewer_assets")
+
+# Friendly names for the sample pages; any other page falls back to its folder name.
 LABELS = {
     "sample": "Address form",
     "image": "Lecture notes",
@@ -14,22 +21,56 @@ LABELS = {
     "image copy 2": "Enrollment form",
 }
 NOTES = {
-    "sample": "Photographed at 90 deg. Detected 8 of 8 lines; crops are inverted because "
-              "orientation is resolved downstream by recognition confidence.",
+    "sample": "Photographed at 90 deg. Crops are inverted because orientation is resolved "
+              "downstream by recognition confidence.",
     "image": "Bleed-through from the reverse side, plus an embedded ER diagram.",
-    "image copy": "Aged paper, tight leading, interpenetrating matras. Hardest page in the set.",
+    "image copy": "Aged paper, tight leading, interpenetrating matras.",
     "image copy 2": "Printed form with handwritten fill, table rules, low resolution.",
 }
 
 
-def collect():
-    out = {}
-    for page in PAGES:
+def build_assets(pages):
+    ASSETS.mkdir(exist_ok=True)
+    for page in pages:
         slug = page.replace(" ", "_")
-        m = json.loads(Path(f"output/{page}/manifest.json").read_text())
+        m = json.loads((OUT / page / "manifest.json").read_text())
+        src = cv2.imread(m["source"])
+        if src is not None:
+            s = 900 / max(src.shape[:2])
+            if s < 1:
+                src = cv2.resize(src, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+            cv2.imwrite(f"{ASSETS}/{slug}_source.jpg", src, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        ov = cv2.imread(str(OUT / page / "debug" / "instances.png"))
+        if ov is not None:
+            s = 900 / max(ov.shape[:2])
+            if s < 1:
+                ov = cv2.resize(ov, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+            cv2.imwrite(f"{ASSETS}/{slug}_overlay.jpg", ov, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        re = cv2.imread(str(OUT / page / "page_reassembled.png"))
+        if re is not None:
+            sc = 760 / max(re.shape[1], 1)
+            if sc < 1:
+                re = cv2.resize(re, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
+            cv2.imwrite(f"{ASSETS}/{slug}_reassembled.jpg", re, [cv2.IMWRITE_JPEG_QUALITY, 84])
+        for ln in m["lines"]:
+            c = cv2.imread(str(OUT / page / ln["file"]))
+            if c is None:
+                continue
+            s = 760 / max(c.shape[1], 1)
+            if s < 1:
+                c = cv2.resize(c, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+            cv2.imwrite(f"{ASSETS}/{slug}_line_{ln['index']:04d}.jpg", c,
+                        [cv2.IMWRITE_JPEG_QUALITY, 84])
+
+
+def collect(pages):
+    out = {}
+    for page in pages:
+        slug = page.replace(" ", "_")
+        m = json.loads((OUT / page / "manifest.json").read_text())
         out[slug] = {
-            "label": LABELS[page],
-            "note": NOTES[page],
+            "label": LABELS.get(page, page),
+            "note": NOTES.get(page, ""),
             "layout": m["layout"],
             "rules_h": m["rules_horizontal"],
             "rules_v": m["rules_vertical"],
@@ -111,7 +152,7 @@ TEMPLATE = """<title>Linecut Segmentation Viewer</title>
   .stat dd.ok{color:var(--ok)} .stat dd.warn{color:var(--warn)}
 
   h2{font-size:17px;margin:36px 0 12px;font-weight:600;letter-spacing:-.01em}
-  .views{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .views{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
   figure{margin:0;background:var(--panel);border:1px solid var(--line);padding:10px}
   figure img{display:block;width:100%;height:auto;background:#fff}
   figcaption{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:8px}
@@ -132,6 +173,7 @@ TEMPLATE = """<title>Linecut Segmentation Viewer</title>
 
   footer{margin-top:52px;padding-top:18px;border-top:1px solid var(--line);
          font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+  @media(max-width:1000px){ .views{grid-template-columns:1fr 1fr} }
   @media(max-width:820px){ .views{grid-template-columns:1fr} .ln{grid-template-columns:44px 1fr}
     .meta{grid-column:1/-1;text-align:left} }
 </style>
@@ -149,10 +191,11 @@ TEMPLATE = """<title>Linecut Segmentation Viewer</title>
   <div class="note" id="note"></div>
   <dl class="stats" id="stats"></dl>
 
-  <h2>Input and detection</h2>
+  <h2>Input, detection, and reassembly</h2>
   <div class="views">
     <figure><img id="src" alt="Source page"><figcaption id="srccap"></figcaption></figure>
-    <figure><img id="ovl" alt="Detected lines"><figcaption>Detected line spines (orange) and their boundaries (green).</figcaption></figure>
+    <figure><img id="ovl" alt="Detected lines"><figcaption>Detected spines (orange) and line boundaries (green).</figcaption></figure>
+    <figure><img id="rea" alt="Reassembled page"><figcaption>Every extracted line stacked back in order &mdash; a cleaned, deskewed page, and a check that nothing was lost or duplicated.</figcaption></figure>
   </div>
 
   <h2 id="lines-h">Extracted lines</h2>
@@ -194,6 +237,7 @@ function render(slug){
 
   $('src').src = slug + '_source.jpg';
   $('ovl').src = slug + '_overlay.jpg';
+  $('rea').src = slug + '_reassembled.jpg';
   $('srccap').textContent = `Source, ${d.source_size[0]} x ${d.source_size[1]} px. Stroke ${d.stroke}px, pitch ${d.pitch}px.`;
 
   $('lines-h').textContent = `Extracted lines (${d.lines.length})`;
@@ -219,10 +263,17 @@ render(current);
 
 
 def main():
-    data = collect()
+    pages = sorted(d.name for d in OUT.iterdir()
+                   if d.is_dir() and (d / "manifest.json").is_file())
+    if not pages:
+        raise SystemExit("no pages in output/ - run segment.py first")
+    if ASSETS.exists():
+        shutil.rmtree(ASSETS)
+    build_assets(pages)
+    data = collect(pages)
     html = TEMPLATE.replace("__DATA__", json.dumps(data, separators=(",", ":")))
-    Path("viewer_assets/viewer.html").write_text(html)
-    print("wrote viewer_assets/viewer.html", len(html), "bytes")
+    (ASSETS / "viewer.html").write_text(html)
+    print(f"viewer built for {len(pages)} page(s): {', '.join(pages)}")
 
 
 if __name__ == "__main__":

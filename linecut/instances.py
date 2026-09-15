@@ -197,6 +197,20 @@ def segment_page_instances(path, out_dir, device="cpu", thresh=0.45, src=None,
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
+    # Stack every line back into one page. Two uses: it is a cleaned, deskewed,
+    # background-free version of the document, and it doubles as a verification view -
+    # if a line is missing, duplicated or mangled, reading the stack top to bottom
+    # shows it immediately in a way a per-line list does not.
+    if found:
+        gap = max(4, int(pitch * 0.12))
+        width = max(f["crop"].shape[1] for f in found)
+        tiles = []
+        for f in found:
+            c = f["crop"]
+            tiles.append(cv2.copyMakeBorder(c, 0, gap, 0, width - c.shape[1],
+                                            cv2.BORDER_CONSTANT, value=(255, 255, 255)))
+        cv2.imwrite(str(out_dir / "page_reassembled.png"), np.vstack(tiles))
+
     if debug:
         _debug(out_dir, deskewed, prob, owner, found, pitch)
     return manifest
