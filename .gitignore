@@ -1,0 +1,17 @@
+# environment
+venv/
+__pycache__/
+*.pyc
+
+# datasets - large archives and extracted data, fetched separately
+*.zip
+*.7z
+corpus/
+datasets/
+
+# run outputs
+output/
+out_*/
+
+# trained weights (regenerate with train_orient.py; current one is disabled anyway)
+*.pt
