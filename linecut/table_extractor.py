@@ -60,8 +60,8 @@ def detect_tables(
     for i, c in enumerate(contours):
         x, y, w, h = cv2.boundingRect(c)
 
-        # Exclude outer full-page boundary boxes
-        if w >= int(W * max_w_frac) and h >= int(H * max_h_frac):
+        # Exclude outer full-page boundary boxes or vertical page-margin lines
+        if (w >= int(W * max_w_frac) and h >= int(H * max_h_frac)) or h >= int(H * 0.85):
             continue
 
         # Minimum dimensions to qualify as a candidate table block

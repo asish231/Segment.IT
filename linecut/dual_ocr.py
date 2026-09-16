@@ -199,21 +199,78 @@ FORM_CORRECTIONS = {
 }
 
 
+_TROCR_HALLUCINATION_PATTERNS = [
+    "helplearn",
+    "communityportal",
+    "recentchanges",
+    "uploadfile",
+    "specialpages",
+    "permanentlink",
+    "pageinformation",
+    "wikidataitem",
+    "citethispage",
+    "whatlinkshere",
+    "relatedchanges",
+    "displaystyle",
+    "freeencyclopedia",
+    "printableversion",
+    "aboutwikipedia",
+    "wikimedia",
+    "wikipedia",
+]
+
+
+def is_trocr_hallucination(text: str) -> bool:
+    """Detect common TrOCR pretraining hallucinations on blank or non-text visual noise."""
+    if not text:
+        return False
+    lower = text.lower().replace(" ", "")
+    if any(sig in lower for sig in _TROCR_HALLUCINATION_PATTERNS):
+        return True
+
+    # Check for alphabet sequence loops: e.g. "a b c d e f g h"
+    if any(seq in lower for seq in ["abcdef", "bcdefg", "cdefgh"]):
+        return True
+
+    return False
+
+
 def reconcile_line(paddle_res: Dict[str, Any], trocr_res: Dict[str, Any]) -> Dict[str, Any]:
     """Reconcile and arbitrate between PaddleOCR and TrOCR predictions.
 
     Uses confidence weighting, token similarity, and form-level corrections.
+    Suppresses hallucinations on non-text or blank crops.
     """
     p_text = paddle_res.get("text", "").strip()
     p_conf = paddle_res.get("confidence", 0.0)
     t_text = trocr_res.get("text", "").strip()
     t_conf = trocr_res.get("confidence", 0.0)
 
+    # Disqualify TrOCR if it generated a known pre-training hallucination
+    if is_trocr_hallucination(t_text):
+        t_text = ""
+        t_conf = 0.0
+
+    # If neither model has at least 50% confidence, treat as noise / non-text
+    if max(p_conf, t_conf) < 0.50:
+        return {"final_text": "", "confidence": 0.0, "status": "empty", "corrections_applied": [], "paddle": paddle_res, "trocr": trocr_res}
+
+    # Also discard isolated single characters if confidence is under 0.70
+    if p_text and len(p_text) == 1 and p_conf < 0.70 and t_conf < 0.70:
+        p_text = ""
+        p_conf = 0.0
+
     # Empty fallbacks
     if not p_text and not t_text:
         return {"final_text": "", "confidence": 0.0, "status": "empty", "corrections_applied": [], "paddle": paddle_res, "trocr": trocr_res}
+
+    # Paddle saw NO text at all in the crop (DBNet detector returned empty)
     if not p_text:
+        # If TrOCR confidence is low or text is very short/noisy, treat as empty blank paper
+        if t_conf < 0.75 or len(t_text) < 3:
+            return {"final_text": "", "confidence": 0.0, "status": "empty", "corrections_applied": [], "paddle": paddle_res, "trocr": trocr_res}
         return {"final_text": t_text, "confidence": t_conf, "status": "trocr_only", "corrections_applied": [], "paddle": paddle_res, "trocr": trocr_res}
+
     if not t_text:
         return {"final_text": p_text, "confidence": p_conf, "status": "paddle_only", "corrections_applied": [], "paddle": paddle_res, "trocr": trocr_res}
 
@@ -267,6 +324,7 @@ def reconcile_line(paddle_res: Dict[str, Any], trocr_res: Dict[str, Any]) -> Dic
         "paddle": paddle_res,
         "trocr": trocr_res,
     }
+
 
 
 def scan_manifest_lines_parallel(

@@ -208,5 +208,42 @@ class TestFastAPIIntegration(unittest.TestCase):
         self.assertEqual(lr_data["schema_version"], "DoLR-DILRMP-v2.0")
 
 
+class TestDualOCRReconciliation(unittest.TestCase):
+    """Tests for linecut.dual_ocr reconciliation, hallucination suppression, and noise rejection."""
+
+    def test_reconcile_real_text_consensus(self):
+        from linecut import dual_ocr
+        p = {"text": "United Provinces FOR COPIES ONLY", "confidence": 0.995}
+        t = {"text": "United Provinces FOR COPIES ONLY", "confidence": 0.98}
+        rec = dual_ocr.reconcile_line(p, t)
+        self.assertEqual(rec["final_text"], "United Provinces FOR COPIES ONLY")
+        self.assertEqual(rec["status"], "consensus")
+
+    def test_reconcile_suppress_wikipedia_hallucinations(self):
+        from linecut import dual_ocr
+        p_empty = {"text": "", "confidence": 0.0}
+        t_hallucinated = {"text": "HelpLearn to editCommunity portalRecent changesUpload file", "confidence": 0.93}
+        rec = dual_ocr.reconcile_line(p_empty, t_hallucinated)
+        self.assertEqual(rec["final_text"], "")
+        self.assertEqual(rec["status"], "empty")
+
+        t_whatlinks = {"text": "What links hereRelated changesUpload fileSpecial pagesPermanent link", "confidence": 0.92}
+        rec2 = dual_ocr.reconcile_line(p_empty, t_whatlinks)
+        self.assertEqual(rec2["final_text"], "")
+
+    def test_reconcile_reject_low_confidence_noise(self):
+        from linecut import dual_ocr
+        p_noise = {"text": "( 6)", "confidence": 0.38}
+        t_noise = {"text": "What links here", "confidence": 0.91}
+        rec = dual_ocr.reconcile_line(p_noise, t_noise)
+        self.assertEqual(rec["final_text"], "")
+
+        p_digit_noise = {"text": "2", "confidence": 0.63}
+        t_digit_noise = {"text": "unsuccessful", "confidence": 0.44}
+        rec2 = dual_ocr.reconcile_line(p_digit_noise, t_digit_noise)
+        self.assertEqual(rec2["final_text"], "")
+
+
 if __name__ == "__main__":
     unittest.main()
+
