@@ -140,7 +140,12 @@ def main():
                 }, indent=2),
                 encoding="utf-8"
             )
-            print(f"Generated unified documents in {out}: document.md, document.docx, document.txt, latent.json")
+            if detected_tables:
+                dual_ocr.reassemble_page_with_tables(
+                    m.get("lines", []), detected_tables, src_img, out / "page_reassembled.png", job_dir=out
+                )
+
+            print(f"Generated unified documents in {out}: document.md, document.docx, document.txt, latent.json, page_reassembled.png")
 
 
 if __name__ == "__main__":

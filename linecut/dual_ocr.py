@@ -628,3 +628,53 @@ def export_docx(
     output_file.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_file))
     return output_file
+
+
+def reassemble_page_with_tables(
+    lines: List[Dict[str, Any]],
+    tables: List[Dict[str, Any]],
+    src_bgr: np.ndarray,
+    out_path: Path,
+    job_dir: Optional[Path] = None,
+    pitch: float = 35.0,
+):
+    """Reassemble a complete page image interleaving deskewed prose lines and clean 2D table crops."""
+    elements = []
+    base_dir = job_dir or out_path.parent
+    for l in lines:
+        f_rel = l.get("file")
+        if not f_rel:
+            continue
+        f_path = base_dir / f_rel
+        if f_path.is_file():
+            crop = cv2.imread(str(f_path))
+            if crop is not None:
+                spine = l.get("spine_on_source", [])
+                y = float(np.mean([pt[1] for pt in spine])) if spine else float(l.get("row", 0) * pitch)
+                elements.append({"type": "line", "y": y, "img": crop})
+
+    for t in tables:
+        tx, ty, tw, th = t.get("bbox", [0, 0, 0, 0])
+        if tw > 0 and th > 0:
+            H, W = src_bgr.shape[:2]
+            y0, y1 = max(0, ty), min(H, ty + th)
+            x0, x1 = max(0, tx), min(W, tx + tw)
+            t_crop = src_bgr[y0:y1, x0:x1]
+            if t_crop.size > 0:
+                elements.append({"type": "table", "y": float(ty), "img": t_crop})
+
+    if not elements:
+        return
+
+    elements.sort(key=lambda e: e["y"])
+    max_w = max(e["img"].shape[1] for e in elements)
+    gap = max(6, int(pitch * 0.2))
+    tiles = []
+    for e in elements:
+        c = e["img"]
+        c_pad = cv2.copyMakeBorder(c, 0, gap, 0, max_w - c.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        tiles.append(c_pad)
+
+    full_page = np.vstack(tiles)
+    cv2.imwrite(str(out_path), full_page)
+

@@ -207,6 +207,10 @@ async def segment(
                     manifest["markdown"] = md_text
                     manifest["document_text"] = txt_text
 
+                    dual_ocr.reassemble_page_with_tables(
+                        manifest.get("lines", []), detected_tables, decoded, out_dir / "page_reassembled.png", job_dir=out_dir
+                    )
+
                 (out_dir / "land_record.json").write_text(
                     json.dumps(l_rec, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
