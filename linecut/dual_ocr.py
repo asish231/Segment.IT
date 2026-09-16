@@ -507,10 +507,12 @@ def _is_line_inside_tables(entry: Dict[str, Any], tables: List[Dict[str, Any]]) 
 def build_unified_document_blocks(
     scanned_lines: List[Dict[str, Any]],
     tables: Optional[List[Dict[str, Any]]] = None,
+    stamps: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Organize prose lines and 2D tables into a single top-to-bottom reading-order list of blocks."""
+    """Organize prose lines, 2D tables, and stamps into a single top-to-bottom reading-order list of blocks."""
     blocks = []
     active_tables = tables or []
+    active_stamps = stamps or []
 
     # 1. Add non-table lines (prose, headers, footers)
     for line in scanned_lines:
@@ -526,7 +528,16 @@ def build_unified_document_blocks(
             "text": text,
         })
 
-    # 2. Add tables at their vertical bounding-box top position
+    # 2. Add stamps at their vertical bounding-box top position
+    for s in active_stamps:
+        bbox = s.get("bbox", [0, 0, 0, 0])
+        blocks.append({
+            "type": "stamp",
+            "y": float(bbox[1]),
+            "stamp": s,
+        })
+
+    # 3. Add tables at their vertical bounding-box top position
     for t in active_tables:
         bbox = t.get("bbox", [0, 0, 0, 0])
         blocks.append({
@@ -535,7 +546,7 @@ def build_unified_document_blocks(
             "table": t,
         })
 
-    # 3. Sort all blocks top-to-bottom by vertical coordinate
+    # 4. Sort all blocks top-to-bottom by vertical coordinate
     blocks.sort(key=lambda b: b["y"])
     return blocks
 
@@ -543,16 +554,23 @@ def build_unified_document_blocks(
 def export_markdown(
     scanned_lines: List[Dict[str, Any]],
     tables: Optional[List[Dict[str, Any]]] = None,
+    stamps: Optional[List[Dict[str, Any]]] = None,
     title: Optional[str] = None,
 ) -> str:
-    """Reconstruct scanned lines and 2D tables into a unified, publication-grade Markdown document."""
+    """Reconstruct scanned lines, 2D tables, and stamps into a unified, publication-grade Markdown document."""
     lines_md = []
     if title:
         lines_md.append(f"# {title}\n")
 
-    blocks = build_unified_document_blocks(scanned_lines, tables)
+    blocks = build_unified_document_blocks(scanned_lines, tables=tables, stamps=stamps)
 
     for b in blocks:
+        if b["type"] == "stamp":
+            s = b["stamp"]
+            s_type = s.get("type", "stamp").replace("_", " ").title()
+            lines_md.append(f"\n*[{s_type}: ID {s.get('stamp_id', 1)}]*\n")
+            continue
+
         if b["type"] == "table":
             t = b["table"]
             tbl_md = t.get("markdown", "").strip()
@@ -584,12 +602,18 @@ def export_markdown(
 def export_text(
     scanned_lines: List[Dict[str, Any]],
     tables: Optional[List[Dict[str, Any]]] = None,
+    stamps: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Reconstruct scanned lines and tables into a plain text document."""
-    blocks = build_unified_document_blocks(scanned_lines, tables)
+    """Reconstruct scanned lines, 2D tables, and stamps into a plain text document."""
+    blocks = build_unified_document_blocks(scanned_lines, tables=tables, stamps=stamps)
     text_pieces = []
 
     for b in blocks:
+        if b["type"] == "stamp":
+            s = b["stamp"]
+            text_pieces.append(f"\n--- [Stamp / Emblem: ID {s.get('stamp_id', 1)}] ---\n")
+            continue
+
         if b["type"] == "table":
             t = b["table"]
             cells = t.get("cells", [])
@@ -615,9 +639,10 @@ def export_docx(
     scanned_lines: List[Dict[str, Any]],
     output_file: Path,
     tables: Optional[List[Dict[str, Any]]] = None,
+    stamps: Optional[List[Dict[str, Any]]] = None,
     title: Optional[str] = None,
 ) -> Path:
-    """Reconstruct scanned lines and 2D tables into a formatted Word (.docx) document."""
+    """Reconstruct scanned lines, 2D tables, and stamps into a formatted Word (.docx) document."""
     import docx
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -627,9 +652,16 @@ def export_docx(
         h = doc.add_heading(title, level=0)
         h.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    blocks = build_unified_document_blocks(scanned_lines, tables)
+    blocks = build_unified_document_blocks(scanned_lines, tables=tables, stamps=stamps)
 
     for b in blocks:
+        if b["type"] == "stamp":
+            s = b["stamp"]
+            p = doc.add_paragraph()
+            run = p.add_run(f"[{s.get('type', 'Official Stamp').replace('_', ' ').title()} - ID {s.get('stamp_id', 1)}]")
+            run.italic = True
+            continue
+
         if b["type"] == "table":
             t = b["table"]
             cells = t.get("cells", [])
@@ -693,10 +725,11 @@ def reassemble_page_with_tables(
     tables: List[Dict[str, Any]],
     src_bgr: np.ndarray,
     out_path: Path,
+    stamps: Optional[List[Dict[str, Any]]] = None,
     job_dir: Optional[Path] = None,
     pitch: float = 35.0,
 ):
-    """Reassemble a complete page image interleaving deskewed prose lines and clean 2D table crops."""
+    """Reassemble a complete page image interleaving deskewed prose lines, intact stamps, and 2D tables."""
     elements = []
     base_dir = job_dir or out_path.parent
     for l in lines:
@@ -710,6 +743,17 @@ def reassemble_page_with_tables(
                 spine = l.get("spine_on_source", [])
                 y = float(np.mean([pt[1] for pt in spine])) if spine else float(l.get("row", 0) * pitch)
                 elements.append({"type": "line", "y": y, "img": crop})
+
+    if stamps:
+        H, W = src_bgr.shape[:2]
+        for s in stamps:
+            sx, sy, sw, sh = s.get("bbox", [0, 0, 0, 0])
+            if sw > 0 and sh > 0:
+                y0, y1 = max(0, sy), min(H, sy + sh)
+                x0, x1 = max(0, sx), min(W, sx + sw)
+                s_crop = src_bgr[y0:y1, x0:x1]
+                if s_crop.size > 0:
+                    elements.append({"type": "stamp", "y": float(sy), "img": s_crop})
 
     for t in tables:
         tx, ty, tw, th = t.get("bbox", [0, 0, 0, 0])
@@ -735,4 +779,5 @@ def reassemble_page_with_tables(
 
     full_page = np.vstack(tiles)
     cv2.imwrite(str(out_path), full_page)
+
 

@@ -39,21 +39,33 @@ def main():
             continue
 
         detected_tables = []
+        detected_stamps = []
         segment_src = src_img
         if not args.no_tables:
-            from linecut import table_extractor
+            from linecut import table_extractor, stamp_extractor
             print(f"\n[Tier 0: Table-First Detection] Detecting 2D tables and cell grids for {image.name}...")
             detected_tables = table_extractor.extract_all_tables(src_img)
             print(f"  Detected {len(detected_tables)} table(s) across document.")
             for t in detected_tables:
                 print(f"    Table {t['table_id']}: {t['rows_count']} rows x {t['cols_count']} cols ({t['cells_count']} cells)")
 
-            if detected_tables:
-                # Mask out table regions so line segmenter stops stripping at table boundaries
+            # Tier 0: Stamp & Non-Text Area Detection
+            detected_stamps = stamp_extractor.detect_stamps(src_img, detected_tables=detected_tables)
+            if detected_stamps:
+                print(f"  [Tier 0: Stamp Separator] Detected {len(detected_stamps)} non-text stamp/medallion region(s).")
+                for s in detected_stamps:
+                    print(f"    Stamp {s['stamp_id']}: bbox={s['bbox']}, edge_density={s['edge_density']}")
+                stamp_extractor.extract_and_save_stamps(detected_stamps, src_img, out)
+
+            if detected_tables or detected_stamps:
+                # Mask out table and stamp regions so line segmenter only strips prose text
                 segment_src = src_img.copy()
                 for t in detected_tables:
                     tx, ty, tw, th = t["bbox"]
                     cv2.rectangle(segment_src, (tx, ty), (tx + tw, ty + th), (255, 255, 255), -1)
+                for s in detected_stamps:
+                    sx, sy, sw, sh = s["bbox"]
+                    cv2.rectangle(segment_src, (sx, sy), (sx + sw, sy + sh), (255, 255, 255), -1)
 
         # Line segmentation runs ONLY on free-form prose text
         if args.mode == "instances":
@@ -122,11 +134,11 @@ def main():
                 print(f"  Saved: {out}/land_record.json and {out}/tables.md")
 
             doc_title = image.stem
-            # Unified document compilation (interleaving prose lines + 2D tables in true reading order)
-            md_text = dual_ocr.export_markdown(m.get("lines", []), tables=detected_tables, title=doc_title)
-            txt_text = dual_ocr.export_text(m.get("lines", []), tables=detected_tables)
+            # Unified document compilation (interleaving prose lines + stamps + 2D tables in true reading order)
+            md_text = dual_ocr.export_markdown(m.get("lines", []), tables=detected_tables, stamps=detected_stamps, title=doc_title)
+            txt_text = dual_ocr.export_text(m.get("lines", []), tables=detected_tables, stamps=detected_stamps)
             docx_path = out / "document.docx"
-            dual_ocr.export_docx(m.get("lines", []), docx_path, tables=detected_tables, title=doc_title)
+            dual_ocr.export_docx(m.get("lines", []), docx_path, tables=detected_tables, stamps=detected_stamps, title=doc_title)
 
             (out / "document.md").write_text(md_text, encoding="utf-8")
             (out / "document.txt").write_text(txt_text, encoding="utf-8")
@@ -136,13 +148,14 @@ def main():
                     "lines_found": m.get("lines_found", len(m.get("lines", []))),
                     "deskew_deg": m.get("deskew_deg"),
                     "layout": m.get("layout"),
+                    "stamps": detected_stamps,
                     "lines": m.get("lines", [])
                 }, indent=2),
                 encoding="utf-8"
             )
-            if detected_tables:
+            if detected_tables or detected_stamps:
                 dual_ocr.reassemble_page_with_tables(
-                    m.get("lines", []), detected_tables, src_img, out / "page_reassembled.png", job_dir=out
+                    m.get("lines", []), detected_tables, src_img, out / "page_reassembled.png", stamps=detected_stamps, job_dir=out
                 )
 
             print(f"Generated unified documents in {out}: document.md, document.docx, document.txt, latent.json, page_reassembled.png")

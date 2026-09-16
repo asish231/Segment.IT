@@ -27,6 +27,7 @@ from linecut import (
     llm_refiner,
     segment_page,
     segment_page_instances,
+    stamp_extractor,
     table_extractor,
     validation,
 )
@@ -78,19 +79,28 @@ async def segment(
     job_id = uuid.uuid4().hex
     out_dir = JOBS / job_id
 
-    # Tier 0: Table-First Detection (mask out tables from line cutter so it only strips prose)
+    # Tier 0: Table & Stamp Detection (mask out tables and non-text stamps from line cutter)
     detected_tables = []
+    detected_stamps = []
     segment_src = decoded
     if extract_tables and decoded is not None:
         try:
             detected_tables = table_extractor.extract_all_tables(decoded)
-            if detected_tables:
+            detected_stamps = stamp_extractor.detect_stamps(decoded, detected_tables=detected_tables)
+            if detected_stamps:
+                stamp_extractor.extract_and_save_stamps(detected_stamps, decoded, out_dir)
+
+            if detected_tables or detected_stamps:
                 segment_src = decoded.copy()
                 for t in detected_tables:
                     tx, ty, tw, th = t["bbox"]
                     cv2.rectangle(segment_src, (tx, ty), (tx + tw, ty + th), (255, 255, 255), -1)
+                for s in detected_stamps:
+                    sx, sy, sw, sh = s["bbox"]
+                    cv2.rectangle(segment_src, (sx, sy), (sx + sw, sy + sh), (255, 255, 255), -1)
         except Exception:
             detected_tables = []
+            detected_stamps = []
 
     try:
         if mode == "instances":
@@ -195,26 +205,27 @@ async def segment(
                     except Exception:
                         pass
 
-                # Re-export unified document (prose + tables interleaved in true reading order)
+                # Re-export unified document (prose + stamps + tables interleaved in true reading order)
                 if ocr:
                     doc_title = Path(image.filename or "Document").stem
                     docx_path = out_dir / "document.docx"
-                    md_text = dual_ocr.export_markdown(manifest.get("lines", []), tables=detected_tables, title=doc_title)
-                    txt_text = dual_ocr.export_text(manifest.get("lines", []), tables=detected_tables)
-                    dual_ocr.export_docx(manifest.get("lines", []), docx_path, tables=detected_tables, title=doc_title)
+                    md_text = dual_ocr.export_markdown(manifest.get("lines", []), tables=detected_tables, stamps=detected_stamps, title=doc_title)
+                    txt_text = dual_ocr.export_text(manifest.get("lines", []), tables=detected_tables, stamps=detected_stamps)
+                    dual_ocr.export_docx(manifest.get("lines", []), docx_path, tables=detected_tables, stamps=detected_stamps, title=doc_title)
                     (out_dir / "document.md").write_text(md_text, encoding="utf-8")
                     (out_dir / "document.txt").write_text(txt_text, encoding="utf-8")
                     manifest["markdown"] = md_text
                     manifest["document_text"] = txt_text
 
                     dual_ocr.reassemble_page_with_tables(
-                        manifest.get("lines", []), detected_tables, decoded, out_dir / "page_reassembled.png", job_dir=out_dir
+                        manifest.get("lines", []), detected_tables, decoded, out_dir / "page_reassembled.png", stamps=detected_stamps, job_dir=out_dir
                     )
 
                 (out_dir / "land_record.json").write_text(
                     json.dumps(l_rec, indent=2, ensure_ascii=False), encoding="utf-8"
                 )
                 manifest["tables"] = detected_tables
+                manifest["stamps"] = detected_stamps
                 manifest["land_record"] = l_rec
                 manifest["validation"] = l_rec.get("validation", {})
                 if "documents" not in manifest:

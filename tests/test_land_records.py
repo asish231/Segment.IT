@@ -244,6 +244,39 @@ class TestDualOCRReconciliation(unittest.TestCase):
         self.assertEqual(rec2["final_text"], "")
 
 
+class TestStampExtractor(unittest.TestCase):
+    """Tests for linecut.stamp_extractor Tier 0 non-text and stamp area detection."""
+
+    def test_stamp_detection_on_clean_document(self):
+        from linecut import stamp_extractor
+        # Synthetic clean text image (white with a few black horizontal text stripes)
+        clean_doc = np.ones((500, 400, 3), dtype=np.uint8) * 255
+        for y in range(50, 450, 40):
+            cv2.putText(clean_doc, "Sample Document Text Line", (30, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
+        stamps = stamp_extractor.detect_stamps(clean_doc)
+        self.assertEqual(len(stamps), 0)
+
+    def test_stamp_detection_on_dense_guilloche(self):
+        from linecut import stamp_extractor
+        # Synthetic document with an ornate cross-hatched security stamp at top
+        doc = np.ones((600, 400, 3), dtype=np.uint8) * 255
+        # Draw dense cross-hatching in y=[50, 180], x=[30, 370]
+        for y in range(50, 180, 6):
+            cv2.line(doc, (30, y), (370, y), (0, 0, 0), 1)
+        for x in range(30, 370, 6):
+            cv2.line(doc, (x, 50), (x, 180), (0, 0, 0), 1)
+
+        stamps = stamp_extractor.detect_stamps(doc)
+        self.assertGreaterEqual(len(stamps), 1)
+        s = stamps[0]
+        self.assertIn("bbox", s)
+        self.assertGreater(s["edge_density"], 0.20)
+        # Verify vertical range overlaps with the synthetic stamp
+        sy, sh = s["bbox"][1], s["bbox"][3]
+        self.assertTrue(50 <= (sy + sh // 2) <= 180)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
