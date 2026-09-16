@@ -23,6 +23,8 @@ def main():
     ap.add_argument("--mode", choices=["global", "instances"], default="instances",
                     help="global: one page angle plus horizontal seams. "
                          "instances: one angle and curve per detected line.")
+    ap.add_argument("--ocr", action="store_true", help="run parallel Dual-OCR and export .md / .docx / .txt")
+    ap.add_argument("--lang", default="en", help="target OCR language (default: en)")
     ap.add_argument("--debug", action="store_true", help="also write energy/seam/ownership maps")
     args = ap.parse_args()
 
@@ -42,6 +44,27 @@ def main():
                   f"({m['lines_flagged']} flagged)  angle={m['angle_deg']:+.1f} "
                   f"margin={m['angle_margin']}  pitch={m['line_pitch_px']}  "
                   f"stroke={m['stroke_width_px']}  {m['energy']}  {m['seconds']}s -> {out}")
+
+        if args.ocr and m.get("lines"):
+            from linecut import dual_ocr
+            import json
+            print(f"Running Dual-OCR (PaddleOCR + TrOCR) on {len(m['lines'])} lines...")
+            scanned = dual_ocr.scan_manifest_lines_parallel(m["lines"], out, lang=args.lang)
+            for line_entry, ocr_result in zip(m["lines"], scanned):
+                line_entry["text"] = ocr_result.get("final_text", "")
+                line_entry["confidence_ocr"] = ocr_result.get("confidence", 0.0)
+                line_entry["dual_ocr"] = ocr_result
+
+            doc_title = image.stem
+            md_text = dual_ocr.export_markdown(scanned, title=doc_title)
+            txt_text = dual_ocr.export_text(scanned)
+            docx_path = out / "document.docx"
+            dual_ocr.export_docx(scanned, docx_path, title=doc_title)
+
+            (out / "document.md").write_text(md_text, encoding="utf-8")
+            (out / "document.txt").write_text(txt_text, encoding="utf-8")
+            (out / "latent.json").write_text(json.dumps({"source": str(image), "lines": m["lines"]}, indent=2), encoding="utf-8")
+            print(f"Generated documents in {out}: document.md, document.docx, document.txt, latent.json")
 
 
 if __name__ == "__main__":
