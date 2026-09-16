@@ -28,7 +28,6 @@ def get_api_key() -> Optional[str]:
         os.environ.get("INCEPTION_LABS_MERCURY_2.5")
         or os.environ.get("INCEPTION_API_KEY")
         or os.environ.get("MERCURY_API_KEY")
-        or "sk_533fc2ccad9e51d877e8d373cfcccc06"
     )
 
 
@@ -137,20 +136,33 @@ Output ONLY valid JSON."""
         return lines, "", str(exc)
 
 
+DEFAULT_CLASSIFICATION = {"is_land_record": None, "confidence": 0.0, "reasoning": ""}
+
+
 def refine_land_record_with_llm(
     land_record: Dict[str, Any],
     tables_markdown: str,
     doc_title: str = "Land Record",
     timeout: int = 45,
-) -> Tuple[Dict[str, Any], str, Optional[str]]:
-    """Send structured land record data and table markdown to Mercury-2.5 for legal/domain refinement."""
+) -> Tuple[Dict[str, Any], str, Dict[str, Any], Optional[str]]:
+    """Send structured land record data and table markdown to Mercury-2.5 for legal/domain
+    refinement, and — in the same call — a hard yes/no classification of whether the source
+    document is actually a land record at all.
+
+    Returns:
+        (refined_record, markdown_table, classification, error_or_none)
+        classification = {"is_land_record": bool, "confidence": 0-1, "reasoning": str}
+    """
     api_key = get_api_key()
     if not api_key:
-        return land_record, tables_markdown, "no_api_key"
+        return land_record, tables_markdown, dict(DEFAULT_CLASSIFICATION), "no_api_key"
 
     prompt = f"""You are an expert Indian Land Records & Revenue Administration Intelligence Engine (DoLR / DILRMP).
-Below is extracted data and table markdown from a scanned land record titled '{doc_title}'.
-The document is from the Revenue Department (Khatauni / Jamabandi / Khasra / Form I & XIV) in English and/or Devanagari Hindi.
+Below is extracted data and table markdown from a scanned document titled '{doc_title}', uploaded to a
+land-record digitization system. It is expected to be a Revenue Department record (Khatauni / Jamabandi /
+Khasra / Form I & XIV / mutation / sale deed) in English and/or an Indian regional script, but it may not be —
+users sometimes upload the wrong file. Judge this independently of OCR quality: a badly-scanned land record
+is still a land record; a perfectly-clean invoice or ID card is not.
 
 TABLE MARKDOWN:
 {tables_markdown}
@@ -159,12 +171,17 @@ CURRENT EXTRACTED RECORD:
 {json.dumps(land_record, indent=2, ensure_ascii=False)}
 
 Task:
-1. Fix any OCR misreads in village name, tehsil, district, landowner names, Khasra/survey numbers, or plot areas.
-2. Cleanly populate the structured JSON according to the standard DILRMP schema.
-3. If an owner's father/husband name is embedded (e.g. 'रामेश्वर पुत्र हरपाल'), separate it cleanly into 'name' and 'father_or_husband_name'.
+1. First, classify: is the source document actually a land/revenue record (jamabandi, khatauni, khasra,
+   mutation register, sale/gift deed, patta, or similar)? Give a confidence (0-1) and a one-sentence reason.
+2. If it is a land record, fix any OCR misreads in village name, tehsil, district, landowner names,
+   Khasra/survey numbers, or plot areas, and cleanly populate the structured JSON per the DILRMP schema.
+   If it is NOT a land record, leave "refined_record" as the input record unchanged (do not invent fields).
+3. If an owner's father/husband name is embedded (e.g. 'रामेश्वर पुत्र हरपाल'), separate it cleanly into
+   'name' and 'father_or_husband_name'.
 4. Ensure plot areas are accurate numeric floats in hectares.
 5. Output a STRICT JSON object with this exact structure:
 {{
+  "classification": {{"is_land_record": true, "confidence": 0.0, "reasoning": "..."}},
   "refined_record": {{
     "schema_version": "DoLR-DILRMP-v2.0",
     "metadata": {{"state": "...", "district": "...", "tehsil": "...", "village": "...", "year": "...", "survey_no": "..."}},
@@ -192,7 +209,7 @@ Output ONLY valid JSON."""
         )
 
         if response.status_code != 200:
-            return land_record, tables_markdown, f"api_error_{response.status_code}"
+            return land_record, tables_markdown, dict(DEFAULT_CLASSIFICATION), f"api_error_{response.status_code}"
 
         resp_json = response.json()
         raw_content = resp_json["choices"][0]["message"]["content"].strip()
@@ -203,6 +220,14 @@ Output ONLY valid JSON."""
             clean_json_str = clean_json_str.split("```")[1].split("```")[0].strip()
 
         data = json.loads(clean_json_str)
+
+        raw_classification = data.get("classification") or {}
+        classification = {
+            "is_land_record": raw_classification.get("is_land_record"),
+            "confidence": float(raw_classification.get("confidence") or 0.0),
+            "reasoning": str(raw_classification.get("reasoning") or ""),
+        }
+
         refined_rec = data.get("refined_record", land_record)
         # Re-run validation on the refined record
         from . import validation
@@ -211,7 +236,8 @@ Output ONLY valid JSON."""
             reported_total_area=refined_rec.get("reported_total_area"),
             owners=refined_rec.get("owners", []),
         )
-        return refined_rec, data.get("markdown_table", tables_markdown), None
+        refined_rec["classification"] = classification
+        return refined_rec, data.get("markdown_table", tables_markdown), classification, None
     except Exception as exc:
         logger.warning(f"Mercury land record refinement exception: {exc}")
-        return land_record, tables_markdown, str(exc)
+        return land_record, tables_markdown, dict(DEFAULT_CLASSIFICATION), str(exc)

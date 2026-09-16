@@ -1,225 +1,296 @@
-import { BackendSegmentResponse, BenchmarkSession } from '../types';
+import {
+  ApiKeySummary,
+  AuthResponse,
+  AuthUser,
+  DashboardStats,
+  JobDetail,
+  JobSummary,
+  LandRecord,
+  SegmentResponse,
+} from '../types';
 
-export const API_BASE_URL = window.location.origin;
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
-export async function runSegmentApi(
-  file: File,
-  ocr: boolean = true,
-  extractTables: boolean = true
-): Promise<BackendSegmentResponse> {
-  const formData = new FormData();
-  formData.append('image', file);
-  formData.append('ocr', String(ocr));
-  formData.append('extract_tables', String(extractTables));
-  formData.append('llm_refine', 'false'); // fast response in UI
+const ACCESS_KEY = 'bhoomi_access_token';
+const REFRESH_KEY = 'bhoomi_refresh_token';
 
-  const response = await fetch('/segment', {
-    method: 'POST',
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Backend error (${response.status}): ${errorText}`);
+export function getAccessToken(): string | null {
+  try {
+    return localStorage.getItem(ACCESS_KEY);
+  } catch {
+    return null;
   }
-
-  return await response.json();
 }
+
+function getRefreshToken(): string | null {
+  try {
+    return localStorage.getItem(REFRESH_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function storeTokens(access: string, refresh: string): void {
+  try {
+    localStorage.setItem(ACCESS_KEY, access);
+    localStorage.setItem(REFRESH_KEY, refresh);
+  } catch {
+    /* private browsing / storage disabled: session just won't survive a refresh */
+  }
+}
+
+export function clearTokens(): void {
+  try {
+    localStorage.removeItem(ACCESS_KEY);
+    localStorage.removeItem(REFRESH_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+let refreshPromise: Promise<boolean> | null = null;
+
+async function tryRefresh(): Promise<boolean> {
+  const refresh_token = getRefreshToken();
+  if (!refresh_token) return false;
+  if (!refreshPromise) {
+    refreshPromise = fetch(`${API_BASE_URL}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token }),
+    })
+      .then(async (res) => {
+        if (!res.ok) return false;
+        const data = await res.json();
+        localStorage.setItem(ACCESS_KEY, data.access_token);
+        return true;
+      })
+      .catch(() => false)
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
+}
+
+async function authFetch(path: string, init: RequestInit = {}, retry = true): Promise<Response> {
+  const token = getAccessToken();
+  const headers = new Headers(init.headers || {});
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+
+  const res = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+
+  if (res.status === 401 && retry) {
+    const refreshed = await tryRefresh();
+    if (refreshed) return authFetch(path, init, false);
+  }
+  return res;
+}
+
+async function authJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await authFetch(path, init);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    let detail = text;
+    try {
+      detail = JSON.parse(text).detail || text;
+    } catch {
+      /* not json */
+    }
+    throw new ApiError(res.status, detail || `Request failed (${res.status})`);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json();
+}
+
+// --- Auth -----------------------------------------------------------
+
+export async function register(
+  email: string,
+  password: string,
+  name: string,
+  state = '',
+  district = ''
+): Promise<AuthResponse> {
+  const res = await fetch(`${API_BASE_URL}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, name, state, district }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.detail || 'registration failed');
+  }
+  const data: AuthResponse = await res.json();
+  storeTokens(data.access_token, data.refresh_token);
+  return data;
+}
+
+export async function login(email: string, password: string): Promise<AuthResponse> {
+  const res = await fetch(`${API_BASE_URL}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.detail || 'invalid email or password');
+  }
+  const data: AuthResponse = await res.json();
+  storeTokens(data.access_token, data.refresh_token);
+  return data;
+}
+
+export function logout(): void {
+  clearTokens();
+}
+
+export async function fetchMe(): Promise<AuthUser> {
+  return authJson<AuthUser>('/auth/me');
+}
+
+export async function listApiKeys(): Promise<ApiKeySummary[]> {
+  return authJson<ApiKeySummary[]>('/auth/api-keys');
+}
+
+export async function createApiKey(name: string): Promise<ApiKeySummary & { key: string }> {
+  return authJson('/auth/api-keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function revokeApiKey(id: string): Promise<void> {
+  await authJson(`/auth/api-keys/${id}`, { method: 'DELETE' });
+}
+
+// --- Health -----------------------------------------------------------
 
 export async function checkBackendHealth(): Promise<{ online: boolean; latency: number }> {
   const start = performance.now();
   try {
-    const res = await fetch('/docs', { method: 'HEAD', cache: 'no-cache' });
+    const res = await fetch(`${API_BASE_URL}/health`, { cache: 'no-cache' });
     const latency = Math.round(performance.now() - start);
-    return { online: res.status === 200 || res.status === 304, latency };
+    return { online: res.ok, latency };
   } catch {
     return { online: false, latency: 0 };
   }
 }
 
-export const INITIAL_SESSIONS: BenchmarkSession[] = [
-  {
-    id: 'bhm_sess_07',
-    title: 'UP Khata Record · Test 07',
-    documentType: 'PDF',
-    script: 'Hindi (Devanagari)',
-    totalFields: 15,
-    accuracy: 96.7,
-    status: 'complete',
-    processingTime: '7.8s',
-    correctionsCount: 2,
-    date: '14 Sep 2026',
-    thumbnailUrl: '/samples/sample_test_subject_1.png',
-    fields: [
-      {
-        id: 'f1',
-        name: 'Owner name',
-        hindiName: 'खातेदार का नाम',
-        expectedValue: 'Ashish Kumar Sharma',
-        extractedValue: 'Ashish Kumar Sharma',
-        confidence: 0.96,
-        status: 'correct',
-        sourceLine: 'Source line 02',
-        bbox: { x: 22, y: 38, w: 45, h: 4 }
-      },
-      {
-        id: 'f2',
-        name: 'Khata number',
-        hindiName: 'खाता संख्या',
-        expectedValue: '112',
-        extractedValue: '112',
-        confidence: 0.94,
-        status: 'correct',
-        sourceLine: 'Source line 01',
-        bbox: { x: 22, y: 32, w: 25, h: 4 }
-      },
-      {
-        id: 'f3',
-        name: 'Khasra number',
-        hindiName: 'खसरा संख्या',
-        expectedValue: '128/4',
-        extractedValue: '128/4',
-        confidence: 0.61,
-        status: 'conflict',
-        paddleValue: '128/4',
-        trocrValue: '123/4',
-        sourceLine: 'Source line 04 · Column 3',
-        bbox: { x: 22, y: 44, w: 35, h: 4 }
-      },
-      {
-        id: 'f4',
-        name: 'Area',
-        hindiName: 'क्षेत्रफल',
-        expectedValue: '0.82 hectare',
-        extractedValue: '0.82 hectare',
-        confidence: 0.89,
-        status: 'correct',
-        sourceLine: 'Source line 05',
-        bbox: { x: 22, y: 50, w: 30, h: 4 }
-      },
-      {
-        id: 'f5',
-        name: 'Village',
-        hindiName: 'ग्राम',
-        expectedValue: 'Rampur',
-        extractedValue: 'Rampur',
-        confidence: 0.92,
-        status: 'correct',
-        sourceLine: 'Header line 02',
-        bbox: { x: 55, y: 24, w: 20, h: 4 }
-      },
-      {
-        id: 'f6',
-        name: 'Tehsil',
-        hindiName: 'तहसील',
-        expectedValue: 'Dadri',
-        extractedValue: 'Dadri',
-        confidence: 0.95,
-        status: 'correct',
-        sourceLine: 'Header line 02',
-        bbox: { x: 35, y: 24, w: 18, h: 4 }
-      },
-      {
-        id: 'f7',
-        name: 'District',
-        hindiName: 'जनपद',
-        expectedValue: 'Gautam Buddha Nagar',
-        extractedValue: 'Gautam Buddha Nagar',
-        confidence: 0.98,
-        status: 'correct',
-        sourceLine: 'Header line 02',
-        bbox: { x: 10, y: 24, w: 24, h: 4 }
-      }
-    ]
-  },
-  {
-    id: 'bhm_sess_06',
-    title: 'Urdu Stamp Paper Deed · 1892',
-    documentType: 'IMG',
-    script: 'Urdu (Nastaliq)',
-    totalFields: 18,
-    accuracy: 92.4,
-    status: 'complete',
-    processingTime: '8.4s',
-    correctionsCount: 1,
-    date: '13 Sep 2026',
-    thumbnailUrl: '/samples/stamp_paper_urdu.png',
-    fields: [
-      {
-        id: 'u1',
-        name: 'Stamp Value',
-        hindiName: 'मूल्य / Stamp Duty',
-        expectedValue: 'Two Annas / Two Rupees Eight Annas',
-        extractedValue: 'Two Annas / Two Rupees Eight Annas',
-        confidence: 0.97,
-        status: 'correct',
-        sourceLine: 'Tier-0 Medallion OCR',
-        bbox: { x: 30, y: 5, w: 40, h: 18 }
-      },
-      {
-        id: 'u2',
-        name: 'Registration Office',
-        hindiName: 'دفتر رجسٹری',
-        expectedValue: 'Court of Sub-Registrar Lahore',
-        extractedValue: 'Court of Sub-Registrar Lahore',
-        confidence: 0.88,
-        status: 'correct',
-        sourceLine: 'Header Line 1',
-        bbox: { x: 20, y: 25, w: 60, h: 5 }
-      },
-      {
-        id: 'u3',
-        name: 'First Party (Vendor)',
-        hindiName: 'طرف اول',
-        expectedValue: 'Sheikh Muhammad Din',
-        extractedValue: 'Sheikh Muhammad Din',
-        confidence: 0.91,
-        status: 'correct',
-        sourceLine: 'Margin Annotation Line 3',
-        bbox: { x: 15, y: 35, w: 45, h: 6 }
-      },
-      {
-        id: 'u4',
-        name: 'Second Party (Vendee)',
-        hindiName: 'طرف دوم',
-        expectedValue: 'Munshi Ram Lal',
-        extractedValue: 'Munshi Ram Lal',
-        confidence: 0.93,
-        status: 'correct',
-        sourceLine: 'Body Line 6',
-        bbox: { x: 15, y: 44, w: 40, h: 6 }
-      }
-    ]
-  },
-  {
-    id: 'bhm_sess_05',
-    title: 'Village Jamabandi Register · 1965',
-    documentType: 'PDF',
-    script: 'Devanagari',
-    totalFields: 22,
-    accuracy: 88.5,
-    status: 'review',
-    processingTime: '9.2s',
-    correctionsCount: 3,
-    date: '12 Sep 2026',
-    thumbnailUrl: '/samples/sample_test_subject_1.png',
-    fields: []
-  },
-  {
-    id: 'bhm_sess_04',
-    title: 'Bhoomi Form 16 · Test 04',
-    documentType: 'IMG',
-    script: 'English / Kannada',
-    totalFields: 12,
-    accuracy: 100.0,
-    status: 'complete',
-    processingTime: '5.1s',
-    correctionsCount: 0,
-    date: '11 Sep 2026',
-    thumbnailUrl: '/samples/sample_test_subject_1.png',
-    fields: []
+// --- Segmentation / OCR pipeline ---------------------------------------
+
+export interface RunSegmentOptions {
+  lang?: string;
+  docType?: string;
+  state?: string;
+  district?: string;
+  tehsil?: string;
+  extractTables?: boolean;
+  llmRefine?: boolean;
+}
+
+export async function runSegmentApi(file: File, opts: RunSegmentOptions = {}): Promise<SegmentResponse> {
+  const formData = new FormData();
+  formData.append('image', file);
+  formData.append('ocr', 'true');
+  formData.append('extract_tables', String(opts.extractTables ?? true));
+  formData.append('llm_refine', String(opts.llmRefine ?? true));
+  formData.append('ocr_lang', opts.lang || 'en');
+  formData.append('doc_type', opts.docType || 'auto');
+  formData.append('state', opts.state || '');
+  formData.append('district', opts.district || '');
+  formData.append('tehsil', opts.tehsil || '');
+  formData.append('include_images', 'true');
+
+  const res = await authFetch('/segment', { method: 'POST', body: formData });
+  if (!res.ok) {
+    const text = await res.text();
+    let detail = text;
+    try {
+      detail = JSON.parse(text).detail || text;
+    } catch {
+      /* not json */
+    }
+    throw new ApiError(res.status, detail || `Backend error (${res.status})`);
   }
-];
+  return res.json();
+}
+
+// --- Jobs ---------------------------------------------------------------
+
+export interface ListJobsParams {
+  status?: string;
+  state?: string;
+  district?: string;
+  mine?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export async function listJobs(params: ListJobsParams = {}): Promise<{ total: number; jobs: JobSummary[] }> {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== '') qs.set(k, String(v));
+  });
+  const query = qs.toString();
+  return authJson(`/v1/jobs${query ? `?${query}` : ''}`);
+}
+
+export async function getJob(id: string): Promise<JobDetail> {
+  return authJson(`/v1/jobs/${id}`);
+}
+
+export async function getStats(): Promise<DashboardStats> {
+  return authJson('/v1/stats');
+}
+
+export async function editLine(jobId: string, index: number, text: string): Promise<{ index: number; text: string }> {
+  return authJson(`/jobs/${jobId}/lines/${index}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+}
+
+export async function editLandRecord(
+  jobId: string,
+  record: LandRecord
+): Promise<{ land_record: LandRecord; validation: LandRecord['validation'] }> {
+  return authJson(`/jobs/${jobId}/land-record`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(record),
+  });
+}
+
+export async function verifyJob(id: string): Promise<JobSummary> {
+  return authJson(`/v1/jobs/${id}/verify`, { method: 'POST' });
+}
+
+export async function rejectJob(id: string, reason: string): Promise<JobSummary> {
+  return authJson(`/v1/jobs/${id}/reject`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export async function deleteJob(id: string): Promise<void> {
+  await authJson(`/jobs/${id}`, { method: 'DELETE' });
+}
+
+export function jobFileUrl(path: string): string {
+  return `${API_BASE_URL}${path}`;
+}
 
 export function downloadFile(filename: string, content: string, contentType: string) {
   const blob = new Blob([content], { type: contentType });

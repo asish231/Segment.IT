@@ -11,6 +11,15 @@ import re
 from fractions import Fraction
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+# Values the extractor fills in when a field genuinely couldn't be read, rather than
+# leaving it blank. These are "missing", not "malformed" or "duplicated" — format and
+# duplicate checks should skip them instead of failing on them.
+PLACEHOLDER_VALUES = {"unspecified", "unknown", "n/a", "na", "-", "--", "none", "null", ""}
+
+
+def _is_placeholder(value: str) -> bool:
+    return value.strip().lower() in PLACEHOLDER_VALUES
+
 
 def parse_area_value(area_str: str) -> Optional[float]:
     """Parse numeric area from English or Hindi strings (e.g. '0.1000 हेक्टेयर', '1.3500 हे.').
@@ -231,16 +240,27 @@ def validate_khasra_numbers(
             "message": "No Khasra numbers found.",
         }
 
+    # A field the extractor couldn't read at all (filled with a placeholder like
+    # "unspecified") is missing data, not a malformed or duplicate value — skip it here
+    # rather than penalizing the record for what's really an OCR gap.
+    unspecified_count = sum(1 for k in normalized_list if _is_placeholder(k))
+    checkable = [k for k in normalized_list if not _is_placeholder(k)]
+
+    if not checkable:
+        return {
+            "rule": "khasra_format",
+            "status": "skipped",
+            "message": f"All {unspecified_count} Khasra/Survey number(s) are unread/unspecified — nothing to check.",
+        }
+
     # Standard pattern: numbers, optionally with slash/dash subdivision (e.g. 452, 452/1, 82-A, 82/4, 128/2-A)
     pattern = re.compile(r"^[0-9]+([/\-][0-9A-Za-z]+)*$")
     invalid = []
     seen = set()
     duplicates = []
 
-    for k in normalized_list:
+    for k in checkable:
         k_clean = k.strip()
-        if not k_clean:
-            continue
         if not pattern.match(k_clean):
             invalid.append(k_clean)
         if k_clean in seen:
@@ -248,17 +268,19 @@ def validate_khasra_numbers(
         seen.add(k_clean)
 
     passed = len(invalid) == 0 and len(duplicates) == 0
+    unspecified_note = f" ({unspecified_count} unspecified, skipped)" if unspecified_count else ""
 
     return {
         "rule": "khasra_format",
         "status": "passed" if passed else "failed",
-        "total_checked": len(normalized_list),
+        "total_checked": len(checkable),
+        "unspecified": unspecified_count,
         "invalid_format": invalid,
         "duplicates": duplicates,
         "message": (
-            f"All {len(normalized_list)} Khasra/Survey numbers valid with no duplicates."
+            f"All {len(checkable)} Khasra/Survey numbers valid with no duplicates{unspecified_note}."
             if passed
-            else f"Issues detected in Khasra numbers: invalid={invalid}, duplicates={duplicates}"
+            else f"Issues detected in Khasra numbers: invalid={invalid}, duplicates={duplicates}{unspecified_note}"
         ),
     }
 

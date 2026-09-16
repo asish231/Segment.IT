@@ -1,0 +1,96 @@
+name: CD (build, push, deploy to AWS)
+
+# Requires these repo settings (Settings -> Secrets and variables -> Actions):
+#   Variables: AWS_REGION, AWS_ROLE_ARN, ECR_API_REPO, ECR_WEB_REPO,
+#              ECS_CLUSTER, ECS_API_SERVICE, ECS_WEB_SERVICE
+# AWS_ROLE_ARN is an IAM role trusted for GitHub OIDC (see infra/iam-oidc.tf) —
+# no long-lived AWS keys are stored in GitHub.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # for OIDC -> AWS
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build-and-push:
+    name: Build & push images to ECR
+    needs: ci
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: tag
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build & push api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_API_REPO }}:${{ steps.tag.outputs.tag }}
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_API_REPO }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_WEB_REPO }}:${{ steps.tag.outputs.tag }}
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_WEB_REPO }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to ECS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Force new deployment (api)
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --service "${{ vars.ECS_API_SERVICE }}" \
+            --force-new-deployment
+
+      - name: Force new deployment (web)
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --service "${{ vars.ECS_WEB_SERVICE }}" \
+            --force-new-deployment
+
+      - name: Wait for api to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --services "${{ vars.ECS_API_SERVICE }}" "${{ vars.ECS_WEB_SERVICE }}"

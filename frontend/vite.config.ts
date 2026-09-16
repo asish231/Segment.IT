@@ -11,14 +11,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/segment': {
-        target: 'http://127.0.0.1:8000',
-        changeOrigin: true,
-      },
-      '/jobs': {
-        target: 'http://127.0.0.1:8000',
-        changeOrigin: true,
-      },
+      '/segment': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      '/jobs': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      '/auth': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      '/v1': { target: 'http://127.0.0.1:8000', changeOrigin: true },
+      '/health': { target: 'http://127.0.0.1:8000', changeOrigin: true },
     },
   },
 })

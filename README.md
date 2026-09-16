@@ -62,15 +62,24 @@ Outputs generated in target directory:
 
 ### 3. REST API Service
 ```bash
-# Start FastAPI server
+# Copy .env.example -> .env and fill in SECRET_KEY / INCEPTION_LABS_MERCURY_2.5 first.
 ./venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
 Interactive API documentation available at: `http://localhost:8000/docs`
 
-#### Example `POST /segment` Request:
+The API requires auth (JWT or an API key) on `/segment` and `/v1/*`. Register once, then use
+the returned `access_token` as a Bearer token:
+
 ```bash
+curl -X POST http://127.0.0.1:8000/auth/register -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"at-least-8-chars","name":"Your Name"}'
+# -> { "access_token": "...", "refresh_token": "...", "user": {...} }
+
+TOKEN=<paste access_token>
+
 curl -X POST "http://127.0.0.1:8000/segment" \
+  -H "Authorization: Bearer $TOKEN" \
   -F "image=@image.png" \
   -F "ocr=true" \
   -F "ocr_lang=hi" \
@@ -82,6 +91,45 @@ curl -X POST "http://127.0.0.1:8000/segment" \
 ```bash
 curl -s "http://127.0.0.1:8000/jobs/{job_id}/land_record.json" | jq .
 ```
+
+#### Other endpoints
+- `GET /v1/jobs`, `GET /v1/jobs/{id}` — persisted job listing/detail (Postgres/SQLite).
+- `GET /v1/stats` — dashboard aggregates (status/state/district breakdowns).
+- `PATCH /jobs/{id}/lines/{index}`, `PATCH /jobs/{id}/land-record` — human corrections;
+  the document.md/.txt/.docx are regenerated and validation is recomputed automatically.
+- `POST /v1/jobs/{id}/verify` / `/reject` — supervisor/admin review workflow.
+- `POST /auth/api-keys` — issue an API key (`bh_...`) as an alternative to a JWT.
+
+---
+
+## 🖥️ Frontend (Studio)
+
+```bash
+cd frontend
+npm install
+npm run dev   # http://localhost:5173, proxies /segment /jobs /auth /v1 /health to :8000
+```
+
+Upload a page, watch it segment into lines/tables/stamps, preview the reconstructed
+document (rendered Markdown / raw Markdown / plain text / per-segment crops), edit any
+OCR line or the extracted land record inline, then **Verify** to approve or reject —
+all backed by the real endpoints above, nothing mocked.
+
+---
+
+## 🐳 Docker Compose (Postgres, Redis, MinIO, api, web)
+
+```bash
+cp .env.example .env   # fill in SECRET_KEY, POSTGRES_PASSWORD, etc.
+docker compose up --build
+# App:    http://localhost:8080
+# API:    http://localhost:8000
+# MinIO:  http://localhost:9001
+```
+
+See [infra/README.md](infra/README.md) for deploying this same stack to AWS
+(ECS Fargate + RDS + EFS + ALB) via Terraform, with CI/CD in
+[.github/workflows](.github/workflows).
 
 ---
 
@@ -102,3 +150,11 @@ Run the full automated test suite covering business rule validation, table cell 
 - [03-datasets.md](docs/03-datasets.md): Training datasets and Indic manuscripts.
 - [04-enterprise-roadmap.md](docs/04-enterprise-roadmap.md): Master enterprise roadmap and model training.
 - [05-land-records-and-validation.md](docs/05-land-records-and-validation.md): Deep dive into MoRD/DoLR Problem Statement 26018 implementation.
+- [07-production-upgrade-plan.md](docs/07-production-upgrade-plan.md): what was mocked in the UI vs. the real backend contract, and the production upgrade (auth, Postgres, Studio UX, Docker/CI/CD/AWS) implemented from it.
+
+## ⚠️ Security note
+
+A previous commit hardcoded a fallback Mercury-2.5 API key as a string literal in
+`linecut/llm_refiner.py`. It has been removed from the current code, but it still
+exists in git history — **rotate that key** with Inception Labs; removing it from
+history (e.g. `git filter-repo`) only helps once the old key is no longer valid.

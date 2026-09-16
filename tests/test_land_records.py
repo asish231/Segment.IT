@@ -182,6 +182,18 @@ class TestFastAPIIntegration(unittest.TestCase):
 
     def setUp(self):
         self.client = TestClient(app)
+        # /segment requires auth — register (or log in, if a previous test run left the
+        # user behind in a persisted dev DB) a throwaway account for this test client.
+        email = "pytest-integration@bhoomi.local"
+        password = "pytest-integration-pw"
+        resp = self.client.post(
+            "/auth/register",
+            json={"email": email, "password": password, "name": "pytest"},
+        )
+        if resp.status_code != 200:
+            resp = self.client.post("/auth/login", json={"email": email, "password": password})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.auth_headers = {"Authorization": f"Bearer {resp.json()['access_token']}"}
 
     def test_segment_with_tables_and_land_record_fetch(self):
         img_path = Path("image copy 2.png")
@@ -193,6 +205,7 @@ class TestFastAPIIntegration(unittest.TestCase):
             "/segment",
             files={"image": ("image_copy_2.png", img_bytes, "image/png")},
             data={"ocr": "false", "extract_tables": "true", "include_images": "false"},
+            headers=self.auth_headers,
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()

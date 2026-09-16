@@ -1,225 +1,134 @@
-import React, { useState, useEffect } from 'react';
-import { ScreenType, BenchmarkSession, ExtractedField } from './types';
-import { INITIAL_SESSIONS, checkBackendHealth } from './services/api';
+import React, { useEffect, useState } from 'react';
+import { ScreenType, AuthUser } from './types';
+import { checkBackendHealth, clearTokens, fetchMe, getAccessToken, logout as apiLogout } from './services/api';
 import { Sidebar, Topbar } from './components/Navigation';
 import { LandingPage } from './screens/LandingPage';
 import { LoginScreen } from './screens/LoginScreen';
 import { DashboardScreen } from './screens/DashboardScreen';
 import { NewSessionScreen } from './screens/NewSessionScreen';
 import { InteractiveStudioScreen } from './screens/InteractiveStudioScreen';
-import { ResultsScreen } from './screens/ResultsScreen';
+import { VerifyScreen } from './screens/VerifyScreen';
 import { ApiPlaygroundScreen } from './screens/ApiPlaygroundScreen';
 
+const VALID_SCREENS: ScreenType[] = ['landing', 'login', 'dashboard', 'new', 'workspace', 'verify', 'api'];
+const APP_SCREENS: ScreenType[] = ['dashboard', 'new', 'workspace', 'verify', 'api'];
+
+function parseHash(): { screen: ScreenType; jobId: string | null } {
+  const raw = window.location.hash.replace('#', '');
+  const [screenPart, jobPart] = raw.split('/');
+  const screen = VALID_SCREENS.includes(screenPart as ScreenType) ? (screenPart as ScreenType) : 'landing';
+  return { screen, jobId: jobPart || null };
+}
+
 export function App() {
-  // Hash routing support for direct linking: #landing, #login, #dashboard, #new, #workspace, #results, #api
-  const getInitialScreen = (): ScreenType => {
-    const hash = window.location.hash.replace('#', '') as ScreenType;
-    const validScreens: ScreenType[] = ['landing', 'login', 'dashboard', 'new', 'workspace', 'results', 'api'];
-    return validScreens.includes(hash) ? hash : 'dashboard';
+  const initial = parseHash();
+  const [currentScreen, setCurrentScreen] = useState<ScreenType>(initial.screen);
+  const [activeJobId, setActiveJobId] = useState<string | null>(initial.jobId);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [backendOnline, setBackendOnline] = useState(true);
+
+  const navigate = (screen: ScreenType, jobId?: string) => {
+    const hash = jobId ? `${screen}/${jobId}` : screen;
+    window.location.hash = hash;
   };
 
-  const [currentScreen, setCurrentScreen] = useState<ScreenType>(getInitialScreen);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
-  const [backendOnline, setBackendOnline] = useState<boolean>(true);
-  const [sessions, setSessions] = useState<BenchmarkSession[]>(INITIAL_SESSIONS);
-  const [activeSession, setActiveSession] = useState<BenchmarkSession>(INITIAL_SESSIONS[0]);
-
-  // Sync with URL hash
+  // Sync from hash (back/forward, and initial deep link)
   useEffect(() => {
-    window.location.hash = currentScreen;
-  }, [currentScreen]);
-
-  useEffect(() => {
-    const handleHashChange = () => {
-      const hash = window.location.hash.replace('#', '') as ScreenType;
-      const validScreens: ScreenType[] = ['landing', 'login', 'dashboard', 'new', 'workspace', 'results', 'api'];
-      if (validScreens.includes(hash)) {
-        setCurrentScreen(hash);
-      }
+    const onHashChange = () => {
+      const { screen, jobId } = parseHash();
+      setCurrentScreen(screen);
+      if (jobId) setActiveJobId(jobId);
     };
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  // Validate any stored session on load
+  useEffect(() => {
+    const token = getAccessToken();
+    if (!token) {
+      setAuthChecked(true);
+      return;
+    }
+    fetchMe()
+      .then((u) => setUser(u))
+      .catch(() => {
+        clearTokens();
+        setUser(null);
+        if (APP_SCREENS.includes(currentScreen)) navigate('login');
+      })
+      .finally(() => setAuthChecked(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Poll backend health
   useEffect(() => {
-    const verifyHealth = async () => {
-      const health = await checkBackendHealth();
-      setBackendOnline(health.online);
-    };
-    verifyHealth();
-    const interval = setInterval(verifyHealth, 15000);
+    const verify = () => checkBackendHealth().then((h) => setBackendOnline(h.online));
+    verify();
+    const interval = setInterval(verify, 15000);
     return () => clearInterval(interval);
   }, []);
 
-  const handleNavigate = (screen: ScreenType) => {
-    setCurrentScreen(screen);
-  };
-
-  const handleSelectSession = (session: BenchmarkSession) => {
-    setActiveSession(session);
-    setCurrentScreen('workspace');
-  };
-
-  const handleStartSession = (
-    file: File | null, 
-    sampleName: string, 
-    _schema: string, 
-    customResult?: any
-  ) => {
-    const newId = `bhm_sess_${Date.now().toString().slice(-4)}`;
-    const title = file ? file.name : sampleName.replace('.png', '').replace(/_/g, ' ');
-    
-    let generatedFields: ExtractedField[] = [...INITIAL_SESSIONS[0].fields];
-
-    // If real backend returned cuts, map them
-    if (customResult && customResult.ocr_results && customResult.ocr_results.length > 0) {
-      generatedFields = customResult.ocr_results.map((r: any, idx: number) => ({
-        id: `f_${idx}`,
-        name: `Extracted Line ${idx + 1}`,
-        expectedValue: r.text || '',
-        extractedValue: r.text || '',
-        confidence: r.confidence || 0.95,
-        status: 'correct',
-        sourceLine: `C++ LineCut ${idx + 1}`,
-        bbox: r.bbox ? { x: r.bbox[0], y: r.bbox[1], w: r.bbox[2], h: r.bbox[3] } : undefined
-      }));
-    }
-
-    const newSession: BenchmarkSession = {
-      id: newId,
-      title: title,
-      documentType: file?.name.endsWith('.pdf') ? 'PDF' : 'IMG',
-      script: sampleName.includes('urdu') ? 'Urdu (Nastaliq)' : 'Hindi (Devanagari)',
-      totalFields: generatedFields.length || 15,
-      accuracy: 94.2,
-      status: 'review',
-      processingTime: '8.4s',
-      correctionsCount: 0,
-      date: 'Today',
-      thumbnailUrl: file ? URL.createObjectURL(file) : `/samples/${sampleName}`,
-      fields: generatedFields
-    };
-
-    setSessions([newSession, ...sessions]);
-    setActiveSession(newSession);
-  };
-
-  const handleUpdateField = (fieldId: string, newValue: string) => {
-    if (!activeSession) return;
-    const updatedFields = activeSession.fields.map(f => {
-      if (f.id === fieldId) {
-        return {
-          ...f,
-          extractedValue: newValue,
-          status: 'corrected' as const,
-          confidence: 0.98
-        };
-      }
-      return f;
-    });
-
-    const updatedSession = {
-      ...activeSession,
-      fields: updatedFields,
-      correctionsCount: activeSession.correctionsCount + 1,
-      accuracy: 96.7
-    };
-
-    setActiveSession(updatedSession);
-    setSessions(sessions.map(s => s.id === updatedSession.id ? updatedSession : s));
+  const handleAuthenticated = (authedUser: AuthUser) => {
+    setUser(authedUser);
+    navigate('dashboard');
   };
 
   const handleLogout = () => {
-    setIsAuthenticated(false);
-    setCurrentScreen('login');
+    apiLogout();
+    setUser(null);
+    navigate('login');
   };
 
-  const handleLoginSuccess = (_email: string) => {
-    setIsAuthenticated(true);
-    setCurrentScreen('dashboard');
+  const handleOpenJob = (jobId: string) => {
+    setActiveJobId(jobId);
+    navigate('workspace', jobId);
   };
 
-  const handleExploreDemo = () => {
-    setIsAuthenticated(true);
-    setCurrentScreen('dashboard');
-  };
-
-  // If user is on the Landing Page, show full-bleed editorial experience
-  if (currentScreen === 'landing') {
-    return (
-      <LandingPage
-        onNavigate={handleNavigate}
-        onExploreDemo={handleExploreDemo}
-        backendOnline={backendOnline}
-      />
-    );
+  if (!authChecked) {
+    return <div className="min-h-screen bg-[#FBF9F5]" />;
   }
 
-  // If on Login screen (or unauthenticated without landing)
-  if (currentScreen === 'login' || !isAuthenticated) {
-    return (
-      <LoginScreen
-        onLoginSuccess={handleLoginSuccess}
-        onExploreDemo={handleExploreDemo}
-      />
-    );
+  if (currentScreen === 'landing' && !user) {
+    return <LandingPage onNavigate={(s) => navigate(s)} />;
   }
 
-  // Dashboard / App Workspace Shell with Sidebar and Topbar
+  if (!user) {
+    return <LoginScreen onAuthenticated={handleAuthenticated} />;
+  }
+
   return (
     <div className="flex min-h-screen bg-[#FBF9F5] text-[#2B2320]">
       <Sidebar
         currentScreen={currentScreen}
-        onNavigate={handleNavigate}
+        onNavigate={(s) => navigate(s, s === 'workspace' || s === 'verify' ? activeJobId || undefined : undefined)}
         backendOnline={backendOnline}
+        user={user}
         onLogout={handleLogout}
       />
 
       <div className="flex-1 flex flex-col min-w-0">
-        <Topbar
-          currentScreen={currentScreen}
-          onNavigate={handleNavigate}
-          backendOnline={backendOnline}
-        />
+        <Topbar currentScreen={currentScreen} onNavigate={(s) => navigate(s)} backendOnline={backendOnline} />
 
         <main className="flex-1 p-6 sm:p-8 overflow-y-auto">
           {currentScreen === 'dashboard' && (
-            <DashboardScreen
-              sessions={sessions}
-              onSelectSession={handleSelectSession}
-              onNavigate={handleNavigate}
-              backendOnline={backendOnline}
-            />
+            <DashboardScreen onOpenJob={handleOpenJob} onNavigate={(s) => navigate(s)} />
           )}
 
           {currentScreen === 'new' && (
-            <NewSessionScreen
-              onStartSession={handleStartSession}
-              onNavigate={handleNavigate}
-            />
+            <NewSessionScreen onDocumentReady={handleOpenJob} onNavigate={(s) => navigate(s)} />
           )}
 
           {currentScreen === 'workspace' && (
-            <InteractiveStudioScreen
-              session={activeSession}
-              onNavigate={handleNavigate}
-              onUpdateField={handleUpdateField}
-            />
+            <InteractiveStudioScreen jobId={activeJobId} onNavigate={(s) => navigate(s, activeJobId || undefined)} />
           )}
 
-          {currentScreen === 'results' && (
-            <ResultsScreen
-              session={activeSession}
-              onNavigate={handleNavigate}
-            />
+          {currentScreen === 'verify' && (
+            <VerifyScreen jobId={activeJobId} user={user} onNavigate={(s) => navigate(s, activeJobId || undefined)} />
           )}
 
-          {currentScreen === 'api' && (
-            <ApiPlaygroundScreen
-              backendOnline={backendOnline}
-            />
-          )}
+          {currentScreen === 'api' && <ApiPlaygroundScreen />}
         </main>
       </div>
     </div>

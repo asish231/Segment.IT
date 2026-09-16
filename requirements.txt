@@ -1,0 +1,34 @@
+# --- API ---
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+python-multipart==0.0.32
+pydantic==2.13.5
+python-dotenv==1.2.3
+
+# --- Auth / DB ---
+SQLAlchemy==2.0.54
+psycopg2-binary==2.9.13
+PyJWT==2.14.0
+bcrypt==5.0.0
+alembic==1.20.0
+
+# --- Vision / OCR pipeline ---
+opencv-python-headless==4.11.0.86
+numpy==2.3.5
+pillow==10.4.0
+scipy==1.15.3
+shapely==2.1.2
+paddleocr==3.7.0
+# 3.3.1 is only published for macOS; Linux (Docker/AWS) tops out at 3.2.2 as of this
+# writing, and paddleocr 3.7.0 works fine against it — so allow a range here.
+paddlepaddle>=3.2.2,<4.0
+paddlex==3.7.2
+torch==2.14.0
+torchvision==0.29.0
+transformers==5.17.0
+
+# --- Documents ---
+python-docx==1.2.0
+
+# --- LLM refinement ---
+requests==2.34.2

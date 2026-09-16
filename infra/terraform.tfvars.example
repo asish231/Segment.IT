@@ -1,0 +1,14 @@
+aws_region  = "ap-south-1"
+project     = "bhoomiai"
+environment = "production"
+
+github_org  = "asish231"
+github_repo = "ocr"
+
+# Generate with: python -c "import secrets; print(secrets.token_urlsafe(48))"
+secret_key  = "REPLACE_ME"
+db_password = "REPLACE_ME"
+
+admin_email      = "admin@bhoomi.local"
+admin_password   = "REPLACE_ME"
+mercury_api_key  = "REPLACE_ME"
