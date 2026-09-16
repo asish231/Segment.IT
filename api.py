@@ -77,16 +77,31 @@ async def segment(
 
     job_id = uuid.uuid4().hex
     out_dir = JOBS / job_id
+
+    # Tier 0: Table-First Detection (mask out tables from line cutter so it only strips prose)
+    detected_tables = []
+    segment_src = decoded
+    if extract_tables and decoded is not None:
+        try:
+            detected_tables = table_extractor.extract_all_tables(decoded)
+            if detected_tables:
+                segment_src = decoded.copy()
+                for t in detected_tables:
+                    tx, ty, tw, th = t["bbox"]
+                    cv2.rectangle(segment_src, (tx, ty), (tx + tw, ty + th), (255, 255, 255), -1)
+        except Exception:
+            detected_tables = []
+
     try:
         if mode == "instances":
             manifest = segment_page_instances(
-                image.filename or "upload", out_dir, device=device, src=decoded,
+                image.filename or "upload", out_dir, device=device, src=segment_src,
             )
         else:
             manifest = segment_page(
                 image.filename or "upload", out_dir,
                 device=device, dewarp=dewarp, threshold=threshold,
-                rotate_extra=rotate, src=decoded,
+                rotate_extra=rotate, src=segment_src,
             )
     except Exception as exc:
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -152,7 +167,8 @@ async def segment(
     # Execute Table & Cell Extraction + Land Record Compilation (MoRD / DoLR PS 26018)
     if extract_tables and decoded is not None:
         try:
-            detected_tables = table_extractor.extract_all_tables(decoded)
+            if not detected_tables:
+                detected_tables = table_extractor.extract_all_tables(decoded)
             if detected_tables:
                 if ocr:
                     detected_tables = dual_ocr.scan_table_cells_parallel(
