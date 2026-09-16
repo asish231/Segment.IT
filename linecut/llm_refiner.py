@@ -135,3 +135,83 @@ Output ONLY valid JSON."""
     except Exception as exc:
         logger.warning(f"LLM refinement exception: {exc}")
         return lines, "", str(exc)
+
+
+def refine_land_record_with_llm(
+    land_record: Dict[str, Any],
+    tables_markdown: str,
+    doc_title: str = "Land Record",
+    timeout: int = 45,
+) -> Tuple[Dict[str, Any], str, Optional[str]]:
+    """Send structured land record data and table markdown to Mercury-2.5 for legal/domain refinement."""
+    api_key = get_api_key()
+    if not api_key:
+        return land_record, tables_markdown, "no_api_key"
+
+    prompt = f"""You are an expert Indian Land Records & Revenue Administration Intelligence Engine (DoLR / DILRMP).
+Below is extracted data and table markdown from a scanned land record titled '{doc_title}'.
+The document is from the Revenue Department (Khatauni / Jamabandi / Khasra / Form I & XIV) in English and/or Devanagari Hindi.
+
+TABLE MARKDOWN:
+{tables_markdown}
+
+CURRENT EXTRACTED RECORD:
+{json.dumps(land_record, indent=2, ensure_ascii=False)}
+
+Task:
+1. Fix any OCR misreads in village name, tehsil, district, landowner names, Khasra/survey numbers, or plot areas.
+2. Cleanly populate the structured JSON according to the standard DILRMP schema.
+3. If an owner's father/husband name is embedded (e.g. 'रामेश्वर पुत्र हरपाल'), separate it cleanly into 'name' and 'father_or_husband_name'.
+4. Ensure plot areas are accurate numeric floats in hectares.
+5. Output a STRICT JSON object with this exact structure:
+{{
+  "refined_record": {{
+    "schema_version": "DoLR-DILRMP-v2.0",
+    "metadata": {{"state": "...", "district": "...", "tehsil": "...", "village": "...", "year": "...", "survey_no": "..."}},
+    "plots": [{{"khasra_no": "...", "area": "...", "area_numeric": 0.0, "land_classification": "...", "crop": "..."}}],
+    "owners": [{{"name": "...", "father_or_husband_name": "...", "share": "..."}}],
+    "mutations": [{{"mutation_no": "...", "details": "..."}}]
+  }},
+  "markdown_table": "Polished markdown representation"
+}}
+Output ONLY valid JSON."""
+
+    try:
+        response = requests.post(
+            INCEPTION_API_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": DEFAULT_MODEL,
+                "reasoning_effort": "high",
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=timeout,
+        )
+
+        if response.status_code != 200:
+            return land_record, tables_markdown, f"api_error_{response.status_code}"
+
+        resp_json = response.json()
+        raw_content = resp_json["choices"][0]["message"]["content"].strip()
+        clean_json_str = raw_content
+        if "```json" in clean_json_str:
+            clean_json_str = clean_json_str.split("```json")[1].split("```")[0].strip()
+        elif "```" in clean_json_str:
+            clean_json_str = clean_json_str.split("```")[1].split("```")[0].strip()
+
+        data = json.loads(clean_json_str)
+        refined_rec = data.get("refined_record", land_record)
+        # Re-run validation on the refined record
+        from . import validation
+        refined_rec["validation"] = validation.run_full_validation(
+            plots=refined_rec.get("plots", []),
+            reported_total_area=refined_rec.get("reported_total_area"),
+            owners=refined_rec.get("owners", []),
+        )
+        return refined_rec, data.get("markdown_table", tables_markdown), None
+    except Exception as exc:
+        logger.warning(f"Mercury land record refinement exception: {exc}")
+        return land_record, tables_markdown, str(exc)

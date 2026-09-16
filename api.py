@@ -21,7 +21,15 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
-from linecut import dual_ocr, llm_refiner, segment_page, segment_page_instances
+from linecut import (
+    dual_ocr,
+    land_records,
+    llm_refiner,
+    segment_page,
+    segment_page_instances,
+    table_extractor,
+    validation,
+)
 
 app = FastAPI(
     title="linecut",
@@ -49,6 +57,7 @@ async def segment(
     threshold: float = Form(0.30, description="Max seam cost to accept a cut (global mode)"),
     dewarp: bool = Form(True, description="Straighten each line before cropping (global mode)"),
     rotate: float = Form(0.0, description="Extra rotation in degrees, added to the detected angle"),
+    extract_tables: bool = Form(True, description="Detect tables, extract 2D cells, and compile land record schema"),
     ocr: bool = Form(True, description="Scan lines with parallel Dual-OCR (PaddleOCR + TrOCR)"),
     ocr_lang: str = Form("en", description="Target OCR language (en, devanagari, hi, etc.)"),
     llm_refine: bool = Form(True, description="Refine OCR lines and format document with Mercury-2.5 reasoning LLM"),
@@ -140,6 +149,60 @@ async def segment(
         except Exception as ocr_exc:
             manifest["ocr_error"] = str(ocr_exc)
 
+    # Execute Table & Cell Extraction + Land Record Compilation (MoRD / DoLR PS 26018)
+    if extract_tables and decoded is not None:
+        try:
+            detected_tables = table_extractor.extract_all_tables(decoded)
+            if detected_tables:
+                if ocr:
+                    detected_tables = dual_ocr.scan_table_cells_parallel(
+                        detected_tables, decoded, lang=ocr_lang
+                    )
+
+                l_rec = land_records.build_structured_land_record(
+                    detected_tables, manifest.get("lines", [])
+                )
+
+                # Mercury-2.5 LLM refinement for land record if enabled
+                if llm_refine and ocr:
+                    try:
+                        all_tables_md = "\n\n".join(
+                            t.get("markdown", "") for t in detected_tables if t.get("markdown")
+                        )
+                        refined_rec, refined_md_tbl, _ = llm_refiner.refine_land_record_with_llm(
+                            l_rec,
+                            all_tables_md,
+                            doc_title=Path(image.filename or "Document").stem,
+                        )
+                        if refined_rec:
+                            l_rec = refined_rec
+                    except Exception:
+                        pass
+
+                # Re-export unified document (prose + tables interleaved in true reading order)
+                if ocr:
+                    doc_title = Path(image.filename or "Document").stem
+                    docx_path = out_dir / "document.docx"
+                    md_text = dual_ocr.export_markdown(manifest.get("lines", []), tables=detected_tables, title=doc_title)
+                    txt_text = dual_ocr.export_text(manifest.get("lines", []), tables=detected_tables)
+                    dual_ocr.export_docx(manifest.get("lines", []), docx_path, tables=detected_tables, title=doc_title)
+                    (out_dir / "document.md").write_text(md_text, encoding="utf-8")
+                    (out_dir / "document.txt").write_text(txt_text, encoding="utf-8")
+                    manifest["markdown"] = md_text
+                    manifest["document_text"] = txt_text
+
+                (out_dir / "land_record.json").write_text(
+                    json.dumps(l_rec, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+                manifest["tables"] = detected_tables
+                manifest["land_record"] = l_rec
+                manifest["validation"] = l_rec.get("validation", {})
+                if "documents" not in manifest:
+                    manifest["documents"] = {}
+                manifest["documents"]["land_record"] = f"/jobs/{job_id}/land_record.json"
+        except Exception as tbl_exc:
+            manifest["table_error"] = str(tbl_exc)
+
     if include_images:
         for line in manifest["lines"]:
             crop_path = out_dir / line["file"]
@@ -219,6 +282,17 @@ def get_document_latent(job_id: str):
     path = JOBS / job_id / "latent.json"
     if not path.is_file():
         raise HTTPException(404, "latent representation not found")
+    return FileResponse(path, media_type="application/json")
+
+
+@app.get("/jobs/{job_id}/land_record.json")
+def get_document_land_record(job_id: str):
+    """Download the verified structured land record in DoLR/DILRMP JSON format."""
+    if not job_id.isalnum():
+        raise HTTPException(400, "bad job id")
+    path = JOBS / job_id / "land_record.json"
+    if not path.is_file():
+        raise HTTPException(404, "land record document not found")
     return FileResponse(path, media_type="application/json")
 
 

@@ -20,5 +20,9 @@ out_*/
 # viewer build assets
 viewer_assets/
 
-# screenshots
+# screenshots and debug crops
 Screenshot*.png
+crop_*.png
+patwari_*.png
+debug_*.png
+table1_*.png
