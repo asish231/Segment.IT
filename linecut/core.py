@@ -85,11 +85,12 @@ class Orientation:
     margin: float
 
 
-def find_orientation(binary, coarse_step=1.0, fine_step=0.2):
-    """Sweep the full 180 deg; the text angle is where the row profile has maximum variance.
+def find_orientation(binary, coarse_step=1.0, fine_step=0.2, max_angle=45.0):
+    """Sweep angles within [-max_angle, max_angle]; the text angle is where the row profile has maximum variance.
 
     Variance, not roughness: strokes are rough at every angle, but only at the true
     angle does the page resolve into dense bands separated by empty gaps.
+    Bounding to [-45, 45] prevents grid/table column lines from causing false 90-deg page flips.
     """
     small = cv2.resize(binary, None, fx=0.4, fy=0.4, interpolation=cv2.INTER_NEAREST)
 
@@ -100,7 +101,7 @@ def find_orientation(binary, coarse_step=1.0, fine_step=0.2):
             return 0.0
         return float((prof / total).var())
 
-    coarse = np.arange(-90, 90, coarse_step)
+    coarse = np.arange(-max_angle, max_angle + 1e-9, coarse_step)
     scores = np.array([score(a) for a in coarse])
     best_coarse = float(coarse[scores.argmax()])
 
@@ -109,6 +110,7 @@ def find_orientation(binary, coarse_step=1.0, fine_step=0.2):
     angle = float(fine[fine_scores.argmax()])
 
     # how decisively did it beat the best rival more than 10 deg away?
-    far = np.abs(((coarse - best_coarse + 90) % 180) - 90) > 10
+    span = 2 * max_angle
+    far = np.abs(((coarse - best_coarse + max_angle) % span) - max_angle) > 10
     margin = float(scores.max() / scores[far].max()) if far.any() and scores[far].max() > 0 else float("inf")
     return Orientation(angle=angle, margin=margin)
