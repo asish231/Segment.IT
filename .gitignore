@@ -26,3 +26,7 @@ crop_*.png
 patwari_*.png
 debug_*.png
 table1_*.png
+
+# frontend build and dependencies
+frontend/node_modules/
+frontend/dist/
