@@ -108,7 +108,7 @@ async def segment(
             if llm_refine:
                 try:
                     manifest["lines"], md_text, llm_err = llm_refiner.refine_lines_with_llm(
-                        manifest["lines"], doc_title=doc_title, layout=manifest.get("layout", "plain")
+                        manifest["lines"], doc_title=doc_title, layout=manifest.get("layout", "plain"), lang=ocr_lang
                     )
                     manifest["llm_refinement"] = {
                         "model": "mercury-2.5",

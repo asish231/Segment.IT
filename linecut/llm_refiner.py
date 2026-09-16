@@ -36,6 +36,7 @@ def refine_lines_with_llm(
     lines: List[Dict[str, Any]],
     doc_title: str = "Document",
     layout: str = "plain",
+    lang: str = "en",
     timeout: int = 45,
 ) -> Tuple[List[Dict[str, Any]], str, Optional[str]]:
     """Send Dual-OCR recognized lines to Mercury-2.5 for intelligence correction.
@@ -58,16 +59,18 @@ def refine_lines_with_llm(
         })
 
     prompt = f"""You are an expert Document Intelligence and OCR Error Correction Engine.
-Below is the sequential, reading-order text extracted by a Dual-OCR system (PaddleOCR + TrOCR) from a scanned document titled '{doc_title}' (layout: {layout}).
-Because of handwriting artifacts, bleed-through, and optical distortions, some lines have common OCR confusions (e.g. 'gt' -> 'It', 'roodel' -> 'model', 'lluyed' -> 'used', 'lara' -> 'data', 'dalabare' -> 'database', 'devdops'/'esy' -> 'develops'/'easy', 'riew' -> 'view', 'Bodeling' -> 'modeling', 'Hepresented' -> 'represented', 'dinomm' -> 'diagram', 'atiribures' -> 'attributes', 'namo' -> 'name', 'ete' -> 'etc', 'FQRM' -> 'FORM').
+Below is the sequential, reading-order text extracted by an OCR system from a scanned document titled '{doc_title}' (language: {lang}, layout: {layout}).
+The document may be in English, Hindi (Devanagari script), or bilingual.
+Because of handwriting artifacts, bleed-through, and optical distortions, some lines have common OCR confusions.
 
 Here are the extracted lines:
-{json.dumps(ocr_payload, indent=2)}
+{json.dumps(ocr_payload, indent=2, ensure_ascii=False)}
 
 Task:
-1. Fix all optical and handwriting OCR misreads line by line using semantic and grammatical reasoning.
-2. If a line is an obvious heading or section title, format it properly.
-3. If lines represent a table, key-value form fields, or diagram labels, format them cleanly.
+1. Fix all optical and handwriting OCR misreads line by line using semantic, grammatical, and domain reasoning.
+2. Preserve the script and language of the original text (e.g., if Hindi, output natural, grammatically correct Devanagari Hindi).
+3. If a line is an obvious heading or section title, format it properly in the markdown.
+4. If lines represent a table, key-value form fields, or diagram labels, format them cleanly in the markdown.
 4. Output a STRICT JSON response with this exact structure:
 {{
   "corrected_lines": [

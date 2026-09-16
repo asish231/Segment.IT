@@ -64,7 +64,7 @@ def main():
                 print(f"Running Inception Labs Mercury-2.5 Intelligence Error Correction...")
                 try:
                     m["lines"], md_text, llm_err = llm_refiner.refine_lines_with_llm(
-                        m["lines"], doc_title=doc_title, layout=m.get("layout", "plain")
+                        m["lines"], doc_title=doc_title, layout=m.get("layout", "plain"), lang=args.lang
                     )
                     if llm_err:
                         print(f"  [LLM Refiner Notice]: {llm_err} (falling back to raw Dual-OCR)")

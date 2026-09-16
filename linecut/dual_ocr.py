@@ -20,25 +20,28 @@ from PIL import Image
 logger = logging.getLogger("linecut.dual_ocr")
 
 # Lazy global model singletons
-_PADDLE_MODEL = None
+_PADDLE_MODELS: Dict[str, Any] = {}
 _TROCR_MODEL = None
 _TROCR_PROCESSOR = None
 _TROCR_TOKENIZER = None
 
 
 def get_paddle_ocr(lang: str = "en"):
-    """Lazy-load and cache the PaddleOCR engine."""
-    global _PADDLE_MODEL
-    if _PADDLE_MODEL is None:
+    """Lazy-load and cache the PaddleOCR engine per language."""
+    global _PADDLE_MODELS
+    norm_lang = lang.lower().strip()
+    if norm_lang in ("hindi", "devanagari"):
+        norm_lang = "hi"
+    if norm_lang not in _PADDLE_MODELS:
         from paddleocr import PaddleOCR
         # Suppress orientation/unwarping in Paddle since LineCut already handles deskew & rectification
-        _PADDLE_MODEL = PaddleOCR(
+        _PADDLE_MODELS[norm_lang] = PaddleOCR(
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
-            lang=lang,
+            lang=norm_lang,
         )
-    return _PADDLE_MODEL
+    return _PADDLE_MODELS[norm_lang]
 
 
 def get_trocr(model_name: str = "microsoft/trocr-small-handwritten"):
@@ -156,8 +159,13 @@ def reconcile_line(paddle_res: Dict[str, Any], trocr_res: Dict[str, Any]) -> Dic
     # Similarity comparison
     similarity = difflib.SequenceMatcher(None, p_text.lower(), t_text.lower()).ratio()
 
+    # If text is Indic/Devanagari (e.g. Hindi), prefer Paddle as TrOCR is Latin-only
+    if any('\u0900' <= char <= '\u097F' for char in p_text):
+        chosen = p_text
+        conf = max(p_conf, 0.70)
+        status = "paddle_indic"
     # If high consensus between both models
-    if similarity >= 0.85:
+    elif similarity >= 0.85:
         chosen = p_text if len(p_text) >= len(t_text) else t_text
         conf = min(1.0, max(p_conf, t_conf) + 0.05)
         status = "consensus"
