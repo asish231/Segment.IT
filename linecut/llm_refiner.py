@@ -89,7 +89,7 @@ Output ONLY valid JSON."""
             },
             json={
                 "model": DEFAULT_MODEL,
-                "reasoning_effort": "low",
+                "reasoning_effort": "high",
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=timeout,
