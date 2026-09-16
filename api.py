@@ -21,12 +21,12 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
-from linecut import dual_ocr, segment_page, segment_page_instances
+from linecut import dual_ocr, llm_refiner, segment_page, segment_page_instances
 
 app = FastAPI(
     title="linecut",
-    description="Segments document images into ordered lines and converts them to digital documents using parallel Dual-OCR.",
-    version="2.0",
+    description="Segments document images into ordered lines and converts them to digital documents using parallel Dual-OCR and Mercury-2.5 LLM refinement.",
+    version="2.1",
 )
 
 JOBS = Path(tempfile.gettempdir()) / "linecut-jobs"
@@ -51,6 +51,7 @@ async def segment(
     rotate: float = Form(0.0, description="Extra rotation in degrees, added to the detected angle"),
     ocr: bool = Form(True, description="Scan lines with parallel Dual-OCR (PaddleOCR + TrOCR)"),
     ocr_lang: str = Form("en", description="Target OCR language (en, devanagari, hi, etc.)"),
+    llm_refine: bool = Form(True, description="Refine OCR lines and format document with Mercury-2.5 reasoning LLM"),
     include_images: bool = Form(True, description="Inline base64 PNG per line"),
     include_raw: bool = Form(False, description="Also inline the unmasked strip per line"),
     keep: bool = Form(True, description="Keep crops and documents on disk for /jobs fetches"),
@@ -100,12 +101,29 @@ async def segment(
                     "corrections": ocr_result.get("corrections_applied", []),
                 }
 
-            # Generate Document Outputs
             doc_title = Path(image.filename or "Document").stem
-            md_text = dual_ocr.export_markdown(scanned, title=doc_title)
-            txt_text = dual_ocr.export_text(scanned)
+
+            # Execute LLM Intelligence Refinement (Mercury-2.5) if enabled
+            md_text = ""
+            if llm_refine:
+                try:
+                    manifest["lines"], md_text, llm_err = llm_refiner.refine_lines_with_llm(
+                        manifest["lines"], doc_title=doc_title, layout=manifest.get("layout", "plain")
+                    )
+                    manifest["llm_refinement"] = {
+                        "model": "mercury-2.5",
+                        "status": "success" if not llm_err else "failed",
+                        "error": llm_err,
+                    }
+                except Exception as l_exc:
+                    manifest["llm_refinement"] = {"model": "mercury-2.5", "status": "failed", "error": str(l_exc)}
+
+            # Generate Document Outputs
+            if not md_text:
+                md_text = dual_ocr.export_markdown(manifest["lines"], title=doc_title)
+            txt_text = dual_ocr.export_text(manifest["lines"])
             docx_path = out_dir / "document.docx"
-            dual_ocr.export_docx(scanned, docx_path, title=doc_title)
+            dual_ocr.export_docx(manifest["lines"], docx_path, title=doc_title)
 
             # Persist textual files
             (out_dir / "document.md").write_text(md_text, encoding="utf-8")

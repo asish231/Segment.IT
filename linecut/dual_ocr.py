@@ -250,7 +250,7 @@ def export_markdown(scanned_lines: List[Dict[str, Any]], title: Optional[str] = 
         lines_md.append(f"# {title}\n")
 
     for entry in scanned_lines:
-        text = entry.get("final_text", "").strip()
+        text = (entry.get("text") or entry.get("final_text") or "").strip()
         if not text:
             continue
 
@@ -276,7 +276,11 @@ def export_markdown(scanned_lines: List[Dict[str, Any]], title: Optional[str] = 
 
 def export_text(scanned_lines: List[Dict[str, Any]]) -> str:
     """Reconstruct scanned lines into plain text document format."""
-    return "\n".join(entry.get("final_text", "").strip() for entry in scanned_lines if entry.get("final_text"))
+    return "\n".join(
+        (entry.get("text") or entry.get("final_text") or "").strip()
+        for entry in scanned_lines
+        if (entry.get("text") or entry.get("final_text"))
+    )
 
 
 def export_docx(scanned_lines: List[Dict[str, Any]], output_file: Path, title: Optional[str] = None) -> Path:
@@ -290,7 +294,7 @@ def export_docx(scanned_lines: List[Dict[str, Any]], output_file: Path, title: O
         h.alignment = docx.enum.text.WD_ALIGN_PARAGRAPH.CENTER
 
     for entry in scanned_lines:
-        text = entry.get("final_text", "").strip()
+        text = (entry.get("text") or entry.get("final_text") or "").strip()
         if not text:
             continue
 

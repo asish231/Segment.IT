@@ -25,6 +25,7 @@ def main():
                          "instances: one angle and curve per detected line.")
     ap.add_argument("--ocr", action="store_true", help="run parallel Dual-OCR and export .md / .docx / .txt")
     ap.add_argument("--lang", default="en", help="target OCR language (default: en)")
+    ap.add_argument("--no-llm", action="store_true", help="skip Inception Labs Mercury-2.5 intelligence correction pass")
     ap.add_argument("--debug", action="store_true", help="also write energy/seam/ownership maps")
     args = ap.parse_args()
 
@@ -46,24 +47,50 @@ def main():
                   f"stroke={m['stroke_width_px']}  {m['energy']}  {m['seconds']}s -> {out}")
 
         if args.ocr and m.get("lines"):
-            from linecut import dual_ocr
+            from linecut import dual_ocr, llm_refiner
             import json
             print(f"Running Dual-OCR (PaddleOCR + TrOCR) on {len(m['lines'])} lines...")
             scanned = dual_ocr.scan_manifest_lines_parallel(m["lines"], out, lang=args.lang)
             for line_entry, ocr_result in zip(m["lines"], scanned):
                 line_entry["text"] = ocr_result.get("final_text", "")
+                line_entry["final_text"] = ocr_result.get("final_text", "")
                 line_entry["confidence_ocr"] = ocr_result.get("confidence", 0.0)
                 line_entry["dual_ocr"] = ocr_result
 
             doc_title = image.stem
-            md_text = dual_ocr.export_markdown(scanned, title=doc_title)
-            txt_text = dual_ocr.export_text(scanned)
+            md_text = ""
+
+            if not args.no_llm:
+                print(f"Running Inception Labs Mercury-2.5 Intelligence Error Correction...")
+                try:
+                    m["lines"], md_text, llm_err = llm_refiner.refine_lines_with_llm(
+                        m["lines"], doc_title=doc_title, layout=m.get("layout", "plain")
+                    )
+                    if llm_err:
+                        print(f"  [LLM Refiner Notice]: {llm_err} (falling back to raw Dual-OCR)")
+                    else:
+                        print(f"  [LLM Refiner]: Mercury-2.5 reasoning refinement completed successfully!")
+                except Exception as exc:
+                    print(f"  [LLM Refiner Warning]: {exc} (falling back to raw Dual-OCR)")
+
+            if not md_text:
+                md_text = dual_ocr.export_markdown(m["lines"], title=doc_title)
+            txt_text = dual_ocr.export_text(m["lines"])
             docx_path = out / "document.docx"
-            dual_ocr.export_docx(scanned, docx_path, title=doc_title)
+            dual_ocr.export_docx(m["lines"], docx_path, title=doc_title)
 
             (out / "document.md").write_text(md_text, encoding="utf-8")
             (out / "document.txt").write_text(txt_text, encoding="utf-8")
-            (out / "latent.json").write_text(json.dumps({"source": str(image), "lines": m["lines"]}, indent=2), encoding="utf-8")
+            (out / "latent.json").write_text(
+                json.dumps({
+                    "source": str(image),
+                    "lines_found": m.get("lines_found", len(m["lines"])),
+                    "deskew_deg": m.get("deskew_deg"),
+                    "layout": m.get("layout"),
+                    "lines": m["lines"]
+                }, indent=2),
+                encoding="utf-8"
+            )
             print(f"Generated documents in {out}: document.md, document.docx, document.txt, latent.json")
 
 
