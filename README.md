@@ -1,10 +1,10 @@
-# BhoomiAI / linecut — Intelligent Land Record Digitization & Validation System
+# BhoomiAI / linecut — Intelligent Land Record Digitization & Validation System 
 
 An enterprise-grade, AI-powered system for digitizing and validating historical Indian land records, cadastral survey registers, and legacy documents, aligned with **Ministry of Rural Development (MoRD) / Department of Land Resources (DoLR) Problem Statement 26018** (Smart India Hackathon).
 
 ---
 
-## 🌟 Key Capabilities
+##  Key Capabilities
 
 1. **Two-Tier Document Segmentation:**
    - **Tier 1 (2D Table & Cell Grid Isolation):** Directional morphological kernels detect horizontal and vertical grid rules, eliminate page border frames, and isolate individual cell bounding boxes `[x, y, w, h]`. Eliminates catastrophic horizontal column welding across landowner names, mutation numbers, and plot areas.
@@ -29,7 +29,7 @@ An enterprise-grade, AI-powered system for digitizing and validating historical 
 
 ---
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### 1. Environment Setup
 ```bash
@@ -102,7 +102,7 @@ curl -s "http://127.0.0.1:8000/jobs/{job_id}/land_record.json" | jq .
 
 ---
 
-## 🖥️ Frontend (Studio)
+## Frontend (Studio)
 
 ```bash
 cd frontend
@@ -117,7 +117,7 @@ all backed by the real endpoints above, nothing mocked.
 
 ---
 
-## 🐳 Docker Compose (Postgres, Redis, MinIO, api, web)
+##  Docker Compose (Postgres, Redis, MinIO, api, web)
 
 ```bash
 cp .env.example .env   # fill in SECRET_KEY, POSTGRES_PASSWORD, etc.
@@ -133,7 +133,7 @@ See [infra/README.md](infra/README.md) for deploying this same stack to AWS
 
 ---
 
-## 🧪 Automated Test Suite
+##  Automated Test Suite
 
 Run the full automated test suite covering business rule validation, table cell grid isolation, DoLR schema compilation, and FastAPI endpoints:
 
@@ -143,7 +143,7 @@ Run the full automated test suite covering business rule validation, table cell 
 
 ---
 
-## 📚 Documentation
+##  Documentation
 
 - [01-architecture.md](docs/01-architecture.md): Six-stage linecut pipeline architecture.
 - [02-findings.md](docs/02-findings.md): Empirical measurements and error analysis.
@@ -152,9 +152,11 @@ Run the full automated test suite covering business rule validation, table cell 
 - [05-land-records-and-validation.md](docs/05-land-records-and-validation.md): Deep dive into MoRD/DoLR Problem Statement 26018 implementation.
 - [07-production-upgrade-plan.md](docs/07-production-upgrade-plan.md): what was mocked in the UI vs. the real backend contract, and the production upgrade (auth, Postgres, Studio UX, Docker/CI/CD/AWS) implemented from it.
 
-## ⚠️ Security note
+##  Security note
 
 A previous commit hardcoded a fallback Mercury-2.5 API key as a string literal in
 `linecut/llm_refiner.py`. It has been removed from the current code, but it still
 exists in git history — **rotate that key** with Inception Labs; removing it from
 history (e.g. `git filter-repo`) only helps once the old key is no longer valid.
+
+Few development research attempts (20%) have used Agentic Engineering. Efforts have been made to avoid bad code, but please review it anyway.
