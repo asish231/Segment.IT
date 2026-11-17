@@ -1,7 +1,7 @@
 # BhoomiAI / linecut — Intelligent Land Record Digitization & Validation System 
 
 An enterprise-grade, AI-powered system for digitizing and validating historical Indian land records, cadastral survey registers, and legacy documents, aligned with **Ministry of Rural Development (MoRD) / Department of Land Resources (DoLR) Problem Statement 26018** (Smart India Hackathon).
-
+![BhoomiAI Workspace](workspace.png)
 ---
 
 ##  Key Capabilities
